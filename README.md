@@ -1,6 +1,6 @@
-# Aura — la météo qui se voit
+# Aura : la météo qui se voit
 
-Application météo en temps réel construite sur les API gratuites d'[Open-Meteo](https://open-meteo.com/). Un seul fichier `index.html`, sans framework ni dépendance, sans clé d'API.
+Application météo en temps réel construite sur les API gratuites d'[Open-Meteo](https://open-meteo.com/). Trois fichiers statiques (`index.html`, `style.css`, `app.js`), sans framework ni dépendance, sans étape de build ni clé d'API.
 
 ## L'idée
 
@@ -43,9 +43,15 @@ Navigation complète au clavier (la frise est un `slider` ARIA piloté aux flèc
 
 ## Lancer le projet
 
-Ouvrez `index.html` dans un navigateur. Pour le mettre en ligne, déposez le fichier sur GitHub Pages, Netlify ou Vercel.
+Ouvrez `index.html` dans un navigateur, ou servez le dossier avec un serveur statique (par exemple `npx serve`).
 
-Avant publication, remplacez `Votre nom` dans le pied de page (lien `#author`) par votre nom et un lien vers votre portfolio.
+## Déploiement
+
+Le site est hébergé sur Vercel et relié à ce dépôt : chaque push sur `main` redéploie la production, et chaque autre branche ou pull request reçoit sa propre URL de prévisualisation. Le fichier `vercel.json` déclare un site statique sans étape de build, des URL sans extension et des en-têtes de sécurité :
+
+- `Content-Security-Policy` : scripts servis uniquement par le site, requêtes réseau limitées aux quatre API Open-Meteo, styles et polices autorisés depuis Google Fonts ;
+- `X-Content-Type-Options` et `Referrer-Policy` ;
+- `Permissions-Policy` : géolocalisation réservée au site lui-même.
 
 ## Crédits
 

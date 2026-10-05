@@ -1,0 +1,1618 @@
+(() => {
+'use strict';
+
+/* ==========================================================================
+   1. Outils
+   ========================================================================== */
+const $ = (s, r = document) => r.querySelector(s);
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const mix = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+const rgba = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const avg = a => a.reduce((s, v) => s + v, 0) / a.length;
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+const minus = n => String(n).replace('-', '−');
+const HOUR = 36e5, DAY = 864e5;
+
+const reduceMQ = matchMedia('(prefers-reduced-motion: reduce)');
+let reduced = reduceMQ.matches;
+
+const store = {
+  get(k, fallback) {
+    try { const v = localStorage.getItem('aura:' + k); return v == null ? fallback : JSON.parse(v); }
+    catch { return fallback; }
+  },
+  set(k, v) { try { localStorage.setItem('aura:' + k, JSON.stringify(v)); } catch { /* stockage indisponible */ } },
+  prune(prefix, keep) {
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('aura:' + prefix) && !k.includes(keep)) localStorage.removeItem(k);
+      }
+    } catch { /* ignore */ }
+  }
+};
+
+function debounce(fn, ms) {
+  let t;
+  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+
+/* --- Temps : Open-Meteo renvoie l'heure locale du lieu ("2026-10-05T14:00").
+       On la manipule comme si c'était de l'UTC, puis on formate en UTC. --- */
+const parseLocal = s => Date.parse(s.length === 10 ? s : s + 'Z');
+const hourOf = ms => new Date(ms).getUTCHours();
+const fmtH = ms => `${hourOf(ms)} h`;
+const fmtClock = ms => {
+  const d = new Date(ms), m = d.getUTCMinutes();
+  return `${d.getUTCHours()} h ${String(m).padStart(2, '0')}`;
+};
+const F_WEEKDAY = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', timeZone: 'UTC' });
+const F_WD_SHORT = new Intl.DateTimeFormat('fr-FR', { weekday: 'short', timeZone: 'UTC' });
+const F_LONG = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
+const F_DM = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+const nf1 = new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+function dayLabel(ms, nowL) {
+  const d0 = Math.floor(nowL / DAY), d = Math.floor(ms / DAY);
+  if (d === d0) return "aujourd'hui";
+  if (d === d0 + 1) return 'demain';
+  return F_WEEKDAY.format(ms);
+}
+const whenLabel = (ms, nowL) => `${dayLabel(ms, nowL)} ${fmtH(ms)}`;
+function vers(ms, nowL) {
+  return Math.floor(ms / DAY) === Math.floor(nowL / DAY) ? `vers ${fmtH(ms)}` : `${dayLabel(ms, nowL)} vers ${fmtH(ms)}`;
+}
+
+/* --- Unités --- */
+const U = {
+  imperial: store.get('units', 'metric') === 'imperial',
+  t(c) { return c == null || !isFinite(c) ? null : Math.round(this.imperial ? c * 9 / 5 + 32 : c); },
+  delta(c) { return this.imperial ? c * 9 / 5 : c; },
+  wind(k) { return k == null ? '–' : Math.round(this.imperial ? k * .621371 : k); },
+  windUnit() { return this.imperial ? 'mph' : 'km/h'; },
+};
+const fmtT = c => { const v = U.t(c); return v == null ? '–' : `${minus(v)}°`; };
+
+/* --- Échelle de couleur des températures : la seule couleur d'accent de l'interface --- */
+const T_SCALE = [
+  [-20, [124, 104, 220]], [-6, [96, 134, 228]], [3, [76, 168, 232]], [10, [78, 196, 180]],
+  [16, [150, 212, 110]], [22, [244, 198, 76]], [28, [240, 140, 60]], [35, [222, 76, 80]], [42, [176, 40, 96]]
+];
+function tempRGB(t) {
+  if (t == null || !isFinite(t)) return [190, 200, 214];
+  if (t <= T_SCALE[0][0]) return T_SCALE[0][1];
+  for (let i = 1; i < T_SCALE.length; i++) {
+    const [t1, c1] = T_SCALE[i];
+    if (t <= t1) { const [t0, c0] = T_SCALE[i - 1]; return mix(c0, c1, (t - t0) / (t1 - t0)); }
+  }
+  return T_SCALE[T_SCALE.length - 1][1];
+}
+const tempCSS = t => rgba(tempRGB(t));
+
+/* --- Codes météo OMM --- */
+const WMO = {
+  0: ['Ciel dégagé', 'clear'], 1: ['Plutôt dégagé', 'clear'], 2: ['Partiellement nuageux', 'partly'], 3: ['Couvert', 'cloudy'],
+  45: ['Brouillard', 'fog'], 48: ['Brouillard givrant', 'fog'],
+  51: ['Bruine légère', 'drizzle'], 53: ['Bruine', 'drizzle'], 55: ['Bruine dense', 'drizzle'],
+  56: ['Bruine verglaçante', 'drizzle'], 57: ['Bruine verglaçante dense', 'drizzle'],
+  61: ['Pluie faible', 'rain'], 63: ['Pluie modérée', 'rain'], 65: ['Forte pluie', 'rain'],
+  66: ['Pluie verglaçante', 'rain'], 67: ['Forte pluie verglaçante', 'rain'],
+  71: ['Neige faible', 'snow'], 73: ['Neige modérée', 'snow'], 75: ['Forte neige', 'snow'], 77: ['Grains de neige', 'snow'],
+  80: ['Averses faibles', 'rain'], 81: ['Averses', 'rain'], 82: ['Averses violentes', 'rain'],
+  85: ['Averses de neige', 'snow'], 86: ['Fortes averses de neige', 'snow'],
+  95: ['Orage', 'storm'], 96: ['Orage avec grêle', 'storm'], 99: ['Orage avec forte grêle', 'storm']
+};
+const wmo = code => WMO[code] || ['Conditions inconnues', 'cloudy'];
+const isWet = kind => kind === 'rain' || kind === 'drizzle' || kind === 'storm';
+
+/* --- Icônes (SVG en ligne, bicolores pour la lisibilité) --- */
+const CLOUD_D = 'M10 24H23A5 5 0 0 0 23 14A7 7 0 0 0 10.6 16.2A4 4 0 0 0 10 24Z';
+const IC_SUN = '<g class="ic-sun"><circle cx="16" cy="16" r="5.2"/><path d="M16 4.6v2.6M16 24.8v2.6M4.6 16h2.6M24.8 16h2.6M7.9 7.9l1.85 1.85M22.25 22.25l1.85 1.85M7.9 24.1l1.85-1.85M22.25 9.75l1.85-1.85"/></g>';
+const IC_MOON = '<path class="ic-moon" d="M20.5 6.2a9.6 9.6 0 1 0 5.4 15.2 7.6 7.6 0 0 1-5.4-15.2Z"/>';
+const cloud = (dx = 0, dy = 0) => `<path class="ic-cloud" transform="translate(${dx} ${dy})" d="${CLOUD_D}"/>`;
+function wxInner(code, day = 1) {
+  const kind = wmo(code)[1];
+  const orb = day ? IC_SUN : IC_MOON;
+  switch (kind) {
+    case 'clear': return orb;
+    case 'partly': return `<g mask="url(#mk-cloud)"><g transform="translate(-1 -2) scale(.8)">${orb}</g></g>${cloud(3, 4)}`;
+    case 'cloudy': return cloud(0, 1);
+    case 'fog': return `${cloud(0, -5)}<path class="ic-fog" d="M6 24h20M9 28h15"/>`;
+    case 'drizzle': return `${cloud(0, -4)}<path class="ic-rain" d="M12 24.5l-.7 1.8M17 24.5l-.7 1.8M22 24.5l-.7 1.8M14.5 28.3l-.7 1.8M19.5 28.3l-.7 1.8"/>`;
+    case 'rain': return `${cloud(0, -4)}<path class="ic-rain" d="M12 23.5l-1.6 4.6M17 23.5l-1.6 4.6M22 23.5l-1.6 4.6"/>`;
+    case 'snow': return `${cloud(0, -4)}<g class="ic-snow"><circle cx="12" cy="25" r="1.3"/><circle cx="17" cy="27.5" r="1.3"/><circle cx="22" cy="25" r="1.3"/><circle cx="14.5" cy="29.8" r="1.1"/><circle cx="19.5" cy="30" r="1.1"/></g>`;
+    case 'storm': return `${cloud(0, -4)}<path class="ic-bolt" d="M17.5 20.5 12.8 27h3.6l-1.6 4.6 5.4-7h-3.7l1.6-4.1Z"/>`;
+    default: return cloud();
+  }
+}
+const wxIcon = (code, day = 1) => `<svg class="wx" viewBox="0 0 32 32" aria-hidden="true">${wxInner(code, day)}</svg>`;
+const IC_DROP = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.2C4.4 3.5 3 5.2 3 7a3 3 0 0 0 6 0c0-1.8-1.4-3.5-3-5.8Z" fill="currentColor"/></svg>';
+
+const ACT_IC = {
+  run: '<circle cx="16" cy="18" r="9"/><path d="M16 18v-4.5M13 5.5h6M16 5.5V9M23.5 10.5l1.8-1.8"/>',
+  bike: '<circle cx="8.5" cy="21" r="5"/><circle cx="23.5" cy="21" r="5"/><path d="M8.5 21l4.5-9h7M23.5 21 19.5 9h-3M13 12l4 9h-8.5M11.5 8.5h3.5"/>',
+  terrace: '<path d="M4.5 15.5a11.5 11.5 0 0 1 23 0Z"/><path d="M16 4v1.5M16 15.5V27M11 27h10"/>',
+  laundry: '<path d="M12 5 6 8l-2.5 6 4.5 1.6V27h16V15.6l4.5-1.6L26 8l-6-3a4 4 0 0 1-8 0Z"/>',
+  photo: '<rect x="4" y="9.5" width="24" height="16.5" rx="3"/><circle cx="16" cy="17.5" r="4.8"/><path d="M11 9.5l2-3.5h6l2 3.5"/>',
+  stars: '<path d="M14 5l2.5 6.2L23 13.7l-6.5 2.6L14 22.5l-2.5-6.2L5 13.7l6.5-2.5Z"/><path d="M24.5 20v6M21.5 23h6"/>',
+};
+
+/* ==========================================================================
+   2. Accès aux API Open-Meteo
+   ========================================================================== */
+class NetworkError extends Error {}
+class ApiError extends Error {}
+
+async function getJSON(url, signal) {
+  let r;
+  try { r = await fetch(url, { signal }); }
+  catch (e) { if (e.name === 'AbortError') throw e; throw new NetworkError('Réseau indisponible'); }
+  if (!r.ok) {
+    let reason = `Erreur ${r.status}`;
+    try { const j = await r.json(); if (j && j.reason) reason = j.reason; } catch { /* ignore */ }
+    throw new ApiError(reason);
+  }
+  return r.json();
+}
+const qs = o => Object.entries(o).map(([k, v]) => `${k}=${String(v).split(',').map(encodeURIComponent).join(',')}`).join('&');
+
+const API = {
+  forecast: (lat, lon) => getJSON('https://api.open-meteo.com/v1/forecast?' + qs({
+    latitude: lat, longitude: lon,
+    current: 'temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m',
+    hourly: 'temperature_2m,apparent_temperature,relative_humidity_2m,dew_point_2m,precipitation_probability,precipitation,weather_code,cloud_cover,visibility,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index,is_day,pressure_msl',
+    daily: 'weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,daylight_duration,uv_index_max,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max',
+    timezone: 'auto', forecast_days: 8,
+  })),
+  air: (lat, lon) => getJSON('https://air-quality-api.open-meteo.com/v1/air-quality?' + qs({
+    latitude: lat, longitude: lon,
+    hourly: 'european_aqi,pm2_5,pm10,ozone,nitrogen_dioxide', timezone: 'auto', forecast_days: 3,
+  })),
+  archive: (lat, lon, start, end) => getJSON('https://archive-api.open-meteo.com/v1/archive?' + qs({
+    latitude: lat, longitude: lon, start_date: start, end_date: end, daily: 'temperature_2m_max', timezone: 'auto',
+  })),
+  geocode: (name, signal) => getJSON('https://geocoding-api.open-meteo.com/v1/search?' + qs({
+    name, count: 6, language: 'fr', format: 'json',
+  }), signal),
+  multi: places => getJSON('https://api.open-meteo.com/v1/forecast?' + qs({
+    latitude: places.map(p => p.lat.toFixed(4)).join(','),
+    longitude: places.map(p => p.lon.toFixed(4)).join(','),
+    current: 'temperature_2m,weather_code', timezone: 'auto',
+  })),
+};
+
+/* ==========================================================================
+   3. Modèle de données
+   ========================================================================== */
+const state = {
+  place: null, model: null, sel: null,
+  aq: null, aqFailed: false, climate: null,
+  demo: false, favs: store.get('favs', []), favTemps: new Map(),
+  loadId: 0, placeChanged: true,
+};
+const nowLocal = () => Date.now() + state.model.offset;
+const keyOf = p => `${(+p.lat).toFixed(2)},${(+p.lon).toFixed(2)}`;
+const samePlace = (a, b) => a && b && Math.abs(a.lat - b.lat) < .01 && Math.abs(a.lon - b.lon) < .01;
+
+function buildModel(f) {
+  const H = f.hourly, D = f.daily;
+  const g = (arr, i, d = null) => (arr && arr[i] != null ? arr[i] : d);
+  const hours = H.time.map((iso, i) => ({
+    iso, t: parseLocal(iso),
+    temp: g(H.temperature_2m, i), app: g(H.apparent_temperature, i, g(H.temperature_2m, i)),
+    rh: g(H.relative_humidity_2m, i), dew: g(H.dew_point_2m, i),
+    pop: g(H.precipitation_probability, i, 0), precip: g(H.precipitation, i, 0),
+    code: g(H.weather_code, i, 3), cloud: g(H.cloud_cover, i, 0), vis: g(H.visibility, i),
+    wind: g(H.wind_speed_10m, i, 0), dir: g(H.wind_direction_10m, i, 0), gust: g(H.wind_gusts_10m, i, 0),
+    uv: g(H.uv_index, i, 0), day: g(H.is_day, i, 1), pres: g(H.pressure_msl, i),
+  })).filter(h => h.temp != null);
+  const days = D.time.map((iso, i) => ({
+    iso, t: parseLocal(iso),
+    code: g(D.weather_code, i, 3), max: g(D.temperature_2m_max, i), min: g(D.temperature_2m_min, i),
+    sunrise: D.sunrise && D.sunrise[i] ? parseLocal(D.sunrise[i]) : NaN,
+    sunset: D.sunset && D.sunset[i] ? parseLocal(D.sunset[i]) : NaN,
+    daylight: g(D.daylight_duration, i), uvMax: g(D.uv_index_max, i, 0),
+    precip: g(D.precipitation_sum, i, 0), pop: g(D.precipitation_probability_max, i, 0),
+    windMax: g(D.wind_speed_10m_max, i, 0), gustMax: g(D.wind_gusts_10m_max, i, 0),
+  })).filter(d => d.max != null);
+  const offset = (f.utc_offset_seconds || 0) * 1000;
+  const sun = [];
+  days.forEach(d => {
+    if (isFinite(d.sunrise)) sun.push({ t: d.sunrise, up: true });
+    if (isFinite(d.sunset)) sun.push({ t: d.sunset, up: false });
+  });
+  sun.sort((a, b) => a.t - b.t);
+  return { hours, days, offset, sun, current: f.current || null, nowIdx: findNowIdx(hours, Date.now() + offset) };
+}
+function findNowIdx(hours, nowL) {
+  let idx = 0;
+  for (let i = 0; i < hours.length; i++) { if (hours[i].t <= nowL) idx = i; else break; }
+  return idx;
+}
+function dayOf(t) {
+  const m = state.model;
+  return m.days.find(d => t >= d.t && t < d.t + DAY) || m.days[0];
+}
+
+/* Instantané : l'heure sélectionnée sur la frise, ou « maintenant » (données courantes). */
+function snap() {
+  const m = state.model;
+  const idx = state.sel ?? m.nowIdx;
+  const h = m.hours[idx];
+  if (state.sel == null && m.current) {
+    const c = m.current, v = (x, d) => (x == null ? d : x);
+    return {
+      ...h, idx, live: true, t: nowLocal(),
+      temp: v(c.temperature_2m, h.temp), app: v(c.apparent_temperature, h.app), rh: v(c.relative_humidity_2m, h.rh),
+      code: v(c.weather_code, h.code), cloud: v(c.cloud_cover, h.cloud), precip: v(c.precipitation, h.precip),
+      wind: v(c.wind_speed_10m, h.wind), dir: v(c.wind_direction_10m, h.dir), gust: v(c.wind_gusts_10m, h.gust),
+      pres: v(c.pressure_msl, h.pres), day: v(c.is_day, h.day),
+    };
+  }
+  return { ...h, idx, live: state.sel == null };
+}
+
+/* Hauteur « perçue » du soleil : 1 = plein jour, 0 = lever/coucher, -1 = nuit noire. */
+function sunState(t) {
+  const ev = state.model.sun;
+  let prev = null, next = null;
+  for (const e of ev) { if (e.t <= t) prev = e; else { next = e; break; } }
+  if (!prev && next) prev = { t: next.t - 12 * HOUR, up: !next.up };
+  if (!next && prev) next = { t: prev.t + 12 * HOUR, up: !prev.up };
+  if (!prev || !next) return { h: .7, prog: .5, isDay: true };
+  const isDay = prev.up && !next.up;
+  const prog = clamp((t - prev.t) / (next.t - prev.t), 0, 1);
+  const dist = Math.min(t - prev.t, next.t - t) / HOUR;
+  return { h: isDay ? clamp(dist / 3, 0, 1) : -clamp(dist / 2.5, 0, 1), prog, isDay };
+}
+
+/* Phase de la Lune (calcul astronomique simplifié, période synodique). */
+function moonPhase(msUTC) {
+  const syn = 29.530588853, ref = Date.UTC(2000, 0, 6, 18, 14);
+  let d = ((msUTC - ref) / DAY) % syn; if (d < 0) d += syn;
+  const p = d / syn;
+  return { p, illum: (1 - Math.cos(2 * Math.PI * p)) / 2, age: d };
+}
+function moonName(p) {
+  if (p < .03 || p > .97) return 'Nouvelle lune';
+  if (p < .22) return 'Premier croissant';
+  if (p < .28) return 'Premier quartier';
+  if (p < .47) return 'Gibbeuse croissante';
+  if (p < .53) return 'Pleine lune';
+  if (p < .72) return 'Gibbeuse décroissante';
+  if (p < .78) return 'Dernier quartier';
+  return 'Dernier croissant';
+}
+/* Partie éclairée de la Lune en tracé SVG (réutilisé par le canvas via Path2D). */
+function moonPath(p, cx, cy, r, south) {
+  let ph = p, flip = false;
+  if (ph > .5) { ph = 1 - ph; flip = true; }
+  if (south) flip = !flip;
+  const k = Math.cos(2 * Math.PI * ph);
+  const rx = Math.max(.01, Math.abs(k) * r);
+  const sweep = k > 0 ? 0 : 1;
+  const d = `M${cx} ${cy - r}A${r} ${r} 0 0 1 ${cx} ${cy + r}A${rx} ${r} 0 0 ${sweep} ${cx} ${cy - r}Z`;
+  return { d, flip };
+}
+
+/* ==========================================================================
+   4. Le ciel vivant (canvas) : chaque paramètre vient des données
+   ========================================================================== */
+const SKY_STOPS = [
+  [-1, [6, 10, 28], [12, 20, 50], [22, 30, 66]],
+  [-.45, [10, 16, 42], [22, 32, 78], [44, 46, 98]],
+  [-.15, [24, 36, 88], [70, 66, 132], [146, 96, 136]],
+  [0, [46, 72, 142], [178, 110, 128], [240, 152, 96]],
+  [.2, [50, 104, 184], [126, 154, 196], [236, 188, 136]],
+  [.55, [34, 98, 190], [68, 138, 212], [124, 176, 228]],
+  [1, [26, 86, 182], [56, 126, 206], [108, 164, 222]],
+];
+function skyPalette(h, cloud, rain, storm, fog) {
+  let i = 1; while (i < SKY_STOPS.length - 1 && h > SKY_STOPS[i][0]) i++;
+  const a = SKY_STOPS[i - 1], b = SKY_STOPS[i];
+  const t = clamp((h - a[0]) / (b[0] - a[0]), 0, 1);
+  let top = mix(a[1], b[1], t), mid = mix(a[2], b[2], t), bot = mix(a[3], b[3], t);
+  const dayness = clamp((h + .25) / .5, 0, 1);
+  const grey = [mix([18, 22, 32], [92, 106, 124], dayness), mix([26, 31, 42], [120, 132, 148], dayness), mix([34, 39, 50], [146, 156, 168], dayness)];
+  const m = clamp(clamp((cloud - .35) / .65, 0, 1) * .82 + rain * .15 + storm * .2, 0, 1);
+  top = mix(top, grey[0], m); mid = mix(mid, grey[1], m); bot = mix(bot, grey[2], m);
+  if (storm > 0) { const k = 1 - .35 * storm; top = top.map(v => v * k); mid = mid.map(v => v * k); bot = bot.map(v => v * (k + .1)); }
+  if (fog > 0) {
+    const fc = mix([58, 62, 72], [192, 197, 204], dayness);
+    mid = mix(mid, fc, fog * .45); bot = mix(bot, fc, fog * .65);
+  }
+  return { top, mid, bot };
+}
+
+const Sky = (() => {
+  const cv = $('#sky');
+  const ctx = cv.getContext('2d');
+  let W = 0, H = 0, dpr = 1, region = { x0: 0, x1: 1, y0: 0, y1: 1 };
+  let running = false, last = 0, clock = 0, flash = 0;
+  const NUM = ['h', 'cloud', 'rain', 'snow', 'fog', 'storm', 'wind', 'sunProg', 'nightProg', 'moonProg', 'moonUp', 'moonIllum'];
+  const T = { top: [10, 16, 40], mid: [20, 28, 64], bot: [32, 38, 80], h: -.6, cloud: .2, rain: 0, snow: 0, fog: 0, storm: 0, wind: 8, dir: 270, sunProg: .5, nightProg: .5, moonProg: .5, moonUp: 0, moonP: .25, moonIllum: .5, south: false };
+  const C = JSON.parse(JSON.stringify(T));
+
+  const rnd = (seed => () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; })(42);
+  const stars = Array.from({ length: 190 }, () => ({ x: rnd(), y: rnd() * .78, r: rnd() < .85 ? .5 + rnd() * .7 : 1.2 + rnd() * .7, ph: rnd() * 6.28, sp: .5 + rnd() * 1.8 }));
+  const clouds = Array.from({ length: 16 }, (_, i) => ({ sp: i % 6, x: rnd(), y: .02 + rnd() * .5, s: .55 + rnd() * .9, v: .6 + rnd() * .8 }));
+  const drops = Array.from({ length: 440 }, () => ({ x: rnd() * 1.2 - .1, y: rnd(), l: 12 + rnd() * 14, v: .85 + rnd() * .5 }));
+  const flakes = Array.from({ length: 260 }, () => ({ x: rnd(), y: rnd(), r: .8 + rnd() * 2.2, v: .3 + rnd() * .7, ph: rnd() * 6.28 }));
+
+  function sprite(seed, col) {
+    const c = document.createElement('canvas'); c.width = 420; c.height = 200;
+    const g = c.getContext('2d');
+    let s = seed * 9301 + 49297;
+    const r = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+    for (let k = 0; k < 10; k++) {
+      const u = r(), px = 70 + u * 280, arch = Math.sin(u * Math.PI);
+      const py = 120 - arch * 34 + (r() - .5) * 26, rad = 34 + arch * 48 + r() * 22;
+      const grd = g.createRadialGradient(px, py, 0, px, py, rad);
+      grd.addColorStop(0, rgba(col, .5)); grd.addColorStop(.55, rgba(col, .26)); grd.addColorStop(1, rgba(col, 0));
+      g.fillStyle = grd; g.beginPath(); g.arc(px, py, rad, 0, 6.283); g.fill();
+    }
+    return c;
+  }
+  const spritesLight = Array.from({ length: 6 }, (_, i) => sprite(i + 1, [255, 255, 255]));
+  const spritesGrey = Array.from({ length: 6 }, (_, i) => sprite(i + 1, [166, 176, 190]));
+  const spritesDark = Array.from({ length: 6 }, (_, i) => sprite(i + 1, [82, 94, 116]));
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+    W = cv.width = Math.round(innerWidth * dpr);
+    H = cv.height = Math.round(innerHeight * dpr);
+    const wide = innerWidth > 960;
+    const stage = $('#stage');
+    const sw = wide && stage ? stage.getBoundingClientRect().width * dpr : W;
+    // Sur mobile, le soleil et la lune passent en haut à droite, hors de la colonne de texte.
+    region = wide ? { x0: 0, x1: sw, y0: H * .1, y1: H * .62, r: 1 } : { x0: W * .4, x1: W * .97, y0: H * .1, y1: H * .3, r: .8 };
+    if (!running) draw(0, false);
+  }
+
+  function set(p) {
+    const pal = skyPalette(p.h, p.cloud, p.rain, p.storm, p.fog);
+    Object.assign(T, p, pal);
+    if (reduced) { Object.assign(C, JSON.parse(JSON.stringify(T))); draw(0, false); }
+    else if (!running) start();
+  }
+
+  function step(dt) {
+    const k = 1 - Math.exp(-dt / 450);
+    for (const key of NUM) C[key] += (T[key] - C[key]) * k;
+    for (const key of ['top', 'mid', 'bot']) C[key] = mix(C[key], T[key], k);
+    const dd = ((T.dir - C.dir) % 360 + 540) % 360 - 180;
+    C.dir += dd * k;
+    C.moonP = T.moonP; C.south = T.south;
+  }
+
+  function draw(dt, animate) {
+    if (!W) return;
+    const dayness = clamp((C.h + .25) / .5, 0, 1);
+    const rw = region.x1 - region.x0;
+
+    // 1. Dégradé du ciel
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, rgba(C.top)); g.addColorStop(.55, rgba(C.mid)); g.addColorStop(1, rgba(C.bot));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    // 2. Clair de lune : plus la lune est pleine et haute, plus le ciel nocturne s'éclaircit
+    const moonlight = C.moonUp * C.moonIllum * (1 - dayness) * (1 - C.cloud * .7);
+    if (moonlight > .01) {
+      const lg = ctx.createLinearGradient(0, 0, 0, H);
+      lg.addColorStop(0, rgba([74, 100, 156], .24 * moonlight));
+      lg.addColorStop(1, rgba([74, 100, 156], .08 * moonlight));
+      ctx.fillStyle = lg; ctx.fillRect(0, 0, W, H);
+    }
+
+    // 3. Étoiles (nuit, masquées par les nuages et estompées par le clair de lune)
+    const starA = clamp(-C.h * 1.8 - .15, 0, 1) * (1 - C.cloud * .92) * (1 - .65 * moonlight);
+    if (starA > .01) {
+      ctx.fillStyle = '#fff';
+      for (const s of stars) {
+        const tw = animate ? .6 + .4 * Math.sin(clock * .001 * s.sp + s.ph) : .85;
+        ctx.globalAlpha = starA * tw * (s.r > 1.1 ? .95 : .7);
+        const r = s.r * dpr;
+        ctx.fillRect(s.x * W - r / 2, s.y * H - r / 2, r, r);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // 4. Lueur d'horizon au lever et au coucher
+    const tw = 1 - clamp(Math.abs(C.h) / .35, 0, 1);
+    if (tw > .01) {
+      const gx = C.h >= 0 ? region.x0 + (.12 + .76 * C.sunProg) * rw : (C.nightProg < .5 ? region.x0 + .85 * rw : region.x0 + .15 * rw);
+      const rg = ctx.createRadialGradient(gx, H * .98, 0, gx, H * .98, Math.max(W, H) * .75);
+      rg.addColorStop(0, rgba([255, 160, 110], tw * .4 * (1 - C.cloud * .6)));
+      rg.addColorStop(1, rgba([255, 160, 110], 0));
+      ctx.fillStyle = rg; ctx.fillRect(0, 0, W, H);
+    }
+
+    // 5. Soleil (position réelle entre lever et coucher)
+    const sunVis = clamp((C.h + .06) / .2, 0, 1);
+    if (sunVis > .01) {
+      const p = C.sunProg;
+      const sx = region.x0 + (.12 + .76 * p) * rw;
+      const sy = region.y1 - (region.y1 - region.y0) * Math.sin(Math.PI * p);
+      const low = 1 - clamp(C.h / .5, 0, 1);
+      const glowC = mix([255, 236, 190], [255, 178, 112], low);
+      const veil = 1 - C.cloud * .82;
+      const R = (190 + 120 * low) * dpr * region.r;
+      const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, R);
+      sg.addColorStop(0, rgba(glowC, .55 * sunVis * veil)); sg.addColorStop(.25, rgba(glowC, .18 * sunVis * veil)); sg.addColorStop(1, rgba(glowC, 0));
+      ctx.fillStyle = sg; ctx.fillRect(sx - R, sy - R, R * 2, R * 2);
+      ctx.globalAlpha = sunVis * clamp(1 - C.cloud * .95, 0, 1);
+      ctx.fillStyle = rgba(mix([255, 250, 232], [255, 214, 160], low));
+      ctx.beginPath(); ctx.arc(sx, sy, 22 * dpr * region.r, 0, 6.283); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // 6. Lune (phase et position approximatives)
+    const moonVis = C.moonUp * (1 - C.cloud * .85) * lerp(1, .32, dayness);
+    if (moonVis > .02) {
+      const p = clamp(C.moonProg, 0, 1);
+      const mx = region.x0 + (.14 + .72 * p) * rw;
+      const my = region.y1 - (region.y1 - region.y0) * .9 * Math.sin(Math.PI * p);
+      const R = 20 * dpr * region.r;
+      const mg = ctx.createRadialGradient(mx, my, 0, mx, my, R * 7);
+      mg.addColorStop(0, rgba([200, 214, 255], .22 * moonVis * (.25 + C.moonIllum) * (1 - dayness)));
+      mg.addColorStop(1, rgba([200, 214, 255], 0));
+      ctx.fillStyle = mg; ctx.fillRect(mx - R * 7, my - R * 7, R * 14, R * 14);
+      ctx.save(); ctx.translate(mx, my);
+      ctx.fillStyle = rgba([210, 220, 240], .1 * moonVis);
+      ctx.beginPath(); ctx.arc(0, 0, R, 0, 6.283); ctx.fill();
+      const { d, flip } = moonPath(C.moonP, 0, 0, R, C.south);
+      if (flip) ctx.scale(-1, 1);
+      ctx.fillStyle = rgba([244, 240, 226], moonVis);
+      ctx.fill(new Path2D(d));
+      ctx.restore();
+    }
+
+    // 7. Nuages (couverture, vitesse et direction du vent)
+    const windX = Math.sin((C.dir + 180) * Math.PI / 180);
+    const drift = (Math.abs(windX) < .25 ? Math.sign(windX || 1) * .25 : windX) * (4 + C.wind * .55);
+    const n = C.cloud * clouds.length;
+    const big = W > 900 * dpr ? 1.25 : .9;
+    const grey = clamp(clamp((C.cloud - .45) / .55, 0, 1) * .75 + C.rain * .3 + C.storm * .2, 0, 1);
+    for (let i = 0; i < clouds.length; i++) {
+      const cl = clouds[i];
+      const a = clamp(n - i, 0, 1);
+      const sw = 420 * cl.s * dpr * big * (.8 + C.cloud * .55), sh = sw * 200 / 420;
+      if (animate) {
+        cl.x += drift * cl.v * cl.s * dpr * dt / 1000 / (W + sw);
+        if (cl.x > 1) { cl.x -= 1; cl.y = .02 + Math.random() * .5; }
+        if (cl.x < 0) { cl.x += 1; cl.y = .02 + Math.random() * .5; }
+      }
+      if (a <= .01) continue;
+      const x = cl.x * (W + sw) - sw, y = cl.y * H * .9;
+      const alpha = a * (.5 + .5 * C.cloud);
+      if (dayness > .01) {
+        ctx.globalAlpha = alpha * dayness * (1 - grey); ctx.drawImage(spritesLight[cl.sp], x, y, sw, sh);
+        ctx.globalAlpha = alpha * dayness * grey; ctx.drawImage(spritesGrey[cl.sp], x, y, sw, sh);
+      }
+      ctx.globalAlpha = alpha * (1 - dayness) * .95; if (dayness < .99) ctx.drawImage(spritesDark[cl.sp], x, y, sw, sh);
+    }
+    ctx.globalAlpha = 1;
+
+    // 8. Brouillard
+    if (C.fog > .02) {
+      const fc = mix([70, 76, 90], [214, 218, 224], dayness);
+      for (let k = 0; k < 3; k++) {
+        const yc = H * (.42 + k * .2), hh = H * .36;
+        const a = C.fog * (.3 + .1 * Math.sin(clock * .0003 + k * 2));
+        const fg = ctx.createLinearGradient(0, yc - hh / 2, 0, yc + hh / 2);
+        fg.addColorStop(0, rgba(fc, 0)); fg.addColorStop(.5, rgba(fc, a)); fg.addColorStop(1, rgba(fc, 0));
+        ctx.fillStyle = fg; ctx.fillRect(0, yc - hh / 2, W, hh);
+      }
+    }
+
+    // 9. Pluie (intensité = précipitations, inclinaison = vent)
+    const tilt = clamp(windX * C.wind / 40, -.75, .75);
+    const nR = Math.floor(C.rain * drops.length);
+    if (nR > 0) {
+      ctx.strokeStyle = rgba(mix([150, 166, 194], [212, 226, 244], dayness), .42);
+      ctx.lineWidth = 1.1 * dpr;
+      ctx.beginPath();
+      for (let i = 0; i < nR; i++) {
+        const d = drops[i];
+        const len = d.l * dpr * (.6 + C.rain * .6);
+        const x = d.x * W, y = d.y * H;
+        ctx.moveTo(x, y); ctx.lineTo(x + tilt * len, y + len);
+        if (animate) {
+          const v = d.v * 1100 * dpr * dt / 1000;
+          d.y += v / H; d.x += tilt * v / W;
+          if (d.y > 1.05) { d.y = -.05; d.x = Math.random() * 1.2 - .1; }
+          if (d.x > 1.1) d.x -= 1.2; else if (d.x < -.1) d.x += 1.2;
+        }
+      }
+      ctx.stroke();
+    }
+
+    // 10. Neige
+    const nS = Math.floor(C.snow * flakes.length);
+    if (nS > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,.85)';
+      ctx.beginPath();
+      for (let i = 0; i < nS; i++) {
+        const f = flakes[i];
+        const x = f.x * W, y = f.y * H, r = f.r * dpr;
+        ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, 6.283);
+        if (animate) {
+          const v = f.v * 70 * dpr * dt / 1000;
+          f.y += v / H;
+          f.x += (Math.sin(clock * .0012 + f.ph) * .35 * dpr + tilt * v * .8) / W;
+          if (f.y > 1.03) { f.y = -.03; f.x = Math.random(); }
+          if (f.x > 1.02) f.x -= 1.04; else if (f.x < -.02) f.x += 1.04;
+        }
+      }
+      ctx.fill();
+    }
+
+    // 11. Éclairs (rares et doux ; désactivés si les animations sont réduites)
+    if (animate && C.storm > .5) {
+      if (Math.random() < dt / 1000 * .18 * C.storm) flash = 1;
+      if (flash > .01) {
+        ctx.fillStyle = rgba([222, 230, 255], flash * .2);
+        ctx.fillRect(0, 0, W, H);
+        flash *= Math.exp(-dt / 110);
+      }
+    }
+  }
+
+  function frame(now) {
+    if (!running) return;
+    const dt = Math.min(50, now - (last || now));
+    last = now; clock += dt;
+    step(dt); draw(dt, true);
+    requestAnimationFrame(frame);
+  }
+  function start() { if (running || reduced) return; running = true; last = 0; requestAnimationFrame(frame); }
+  function stop() { running = false; }
+
+  addEventListener('resize', debounce(resize, 120));
+  document.addEventListener('visibilitychange', () => (document.hidden ? stop() : start()));
+  resize();
+  return {
+    set, resize,
+    motionChanged() { if (reduced) { stop(); Object.assign(C, JSON.parse(JSON.stringify(T))); draw(0, false); } else start(); },
+  };
+})();
+reduceMQ.addEventListener && reduceMQ.addEventListener('change', e => { reduced = e.matches; Sky.motionChanged(); });
+
+function skyParams(s) {
+  const m = state.model;
+  const t = s.live ? nowLocal() : s.t;
+  const sun = sunState(t);
+  const kind = wmo(s.code)[1];
+  const pr = s.precip || 0;
+  const moon = moonPhase(t - m.offset);
+  const hod = ((t % DAY) + DAY) % DAY / HOUR;
+  const transit = (12 + 24 * moon.p) % 24;
+  const mp = (((hod - (transit - 6)) % 24) + 24) % 24 / 12;
+  return {
+    h: sun.h,
+    sunProg: sun.isDay ? sun.prog : (sun.prog < .5 ? 1 : 0),
+    nightProg: sun.isDay ? .5 : sun.prog,
+    cloud: clamp((s.cloud ?? 0) / 100, 0, 1),
+    rain: kind === 'drizzle' ? .16 : (kind === 'rain' || kind === 'storm') ? clamp(.25 + pr / 4, .25, 1) : 0,
+    snow: kind === 'snow' ? clamp(.3 + pr / 3, .3, 1) : 0,
+    fog: kind === 'fog' ? 1 : clamp((3000 - (s.vis ?? 20000)) / 3000, 0, .6),
+    storm: kind === 'storm' ? 1 : 0,
+    wind: s.wind ?? 0, dir: s.dir ?? 270,
+    moonP: moon.p, moonIllum: moon.illum,
+    moonUp: mp <= 1 ? 1 : 0, moonProg: mp <= 1 ? mp : (mp < 1.5 ? 1 : 0),
+    south: state.place.lat < 0,
+  };
+}
+const updateSky = () => Sky.set(skyParams(snap()));
+
+/* ==========================================================================
+   5. Héros
+   ========================================================================== */
+function countTo(el, to) {
+  if (to == null) { el.textContent = '–'; el.dataset.v = ''; return; }
+  const from = parseFloat(el.dataset.v);
+  el.dataset.v = to;
+  cancelAnimationFrame(el._raf);
+  if (reduced || !isFinite(from) || from === to) { el.textContent = minus(to); return; }
+  const t0 = performance.now(), dur = clamp(Math.abs(to - from) * 45, 250, 900);
+  const stepFn = now => {
+    const k = clamp((now - t0) / dur, 0, 1), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = minus(Math.round(from + (to - from) * e));
+    if (k < 1) el._raf = requestAnimationFrame(stepFn);
+  };
+  el._raf = requestAnimationFrame(stepFn);
+}
+
+function renderPlaceHeader() {
+  const p = state.place;
+  $('#place-name').textContent = p.name;
+  $('#region').textContent = p.region || '';
+  const fav = state.favs.some(f => samePlace(f, p));
+  const b = $('#fav');
+  b.setAttribute('aria-pressed', fav);
+  b.setAttribute('aria-label', fav ? `Retirer ${p.name} de vos lieux` : `Enregistrer ${p.name} dans vos lieux`);
+  b.title = fav ? 'Retirer de vos lieux' : 'Enregistrer ce lieu';
+}
+
+function renderHero() {
+  const m = state.model, s = snap(), nowL = nowLocal();
+  const d = dayOf(s.t);
+  countTo($('#temp'), U.t(s.temp));
+  $('#cond').textContent = wmo(s.code)[0];
+  $('#feels').textContent = `Ressenti ${fmtT(s.app)}`;
+  $('#tr-min').textContent = fmtT(d.min);
+  $('#tr-max').textContent = fmtT(d.max);
+  $('#tr-fill').style.background = `linear-gradient(90deg, ${tempCSS(d.min)}, ${tempCSS((d.min + d.max) / 2)}, ${tempCSS(d.max)})`;
+  $('#tr-dot').style.left = `${clamp((s.temp - d.min) / Math.max(1, d.max - d.min), 0, 1) * 100}%`;
+  const elsewhere = m.offset !== -new Date().getTimezoneOffset() * 6e4;
+  $('#when').textContent = s.live
+    ? `${cap(F_LONG.format(nowL))}, ${fmtClock(nowL)}${elsewhere ? ' (heure locale)' : ''}`
+    : `Prévision pour ${whenLabel(s.t, nowL)}`;
+  $('#hero').classList.toggle('is-forecast', !s.live);
+  $('#back-now').hidden = s.live;
+  document.documentElement.style.setProperty('--accent', tempCSS(s.temp));
+}
+
+/* Résumé en langage naturel, calculé à partir des prévisions horaires. */
+function insight() {
+  const m = state.model, i0 = m.nowIdx, nowL = nowLocal();
+  const next12 = m.hours.slice(i0 + 1, i0 + 13);
+  const out = [];
+  const cur = snapNow();
+  const wetNow = (cur.precip || 0) > .05 || isWet(wmo(cur.code)[1]) || wmo(cur.code)[1] === 'snow';
+  if (wetNow) {
+    const stop = next12.find(h => (h.precip || 0) < .05 && (h.pop ?? 0) < 40);
+    const what = wmo(cur.code)[1] === 'snow' ? 'Neige' : 'Pluie';
+    out.push(stop ? `${what} en cours, accalmie attendue ${vers(stop.t, nowL)}.` : `${what} en cours, sans accalmie nette d'ici 12 h.`);
+  } else {
+    const start = next12.find(h => (h.pop ?? 0) >= 50 || (h.precip || 0) >= .3);
+    if (start) {
+      const what = wmo(start.code)[1] === 'snow' ? 'Neige probable' : 'Pluie probable';
+      out.push(`${what} ${vers(start.t, nowL)} (${start.pop ?? '?'} %).`);
+    } else out.push('Pas de pluie attendue dans les 12 prochaines heures.');
+  }
+  const gust = next12.reduce((a, h) => ((h.gust || 0) > (a.gust || 0) ? h : a), next12[0] || {});
+  if ((gust.gust || 0) >= 60) out.push(`Rafales jusqu'à ${U.wind(gust.gust)} ${U.windUnit()} ${vers(gust.t, nowL)}.`);
+  const [d0, d1] = m.days;
+  if (d1 && Math.abs(d1.max - d0.max) >= 3) {
+    const diff = Math.round(U.delta(d1.max - d0.max));
+    out.push(diff > 0 ? `Demain sera nettement plus chaud (+${diff}°).` : `Demain sera nettement plus frais (${minus(diff)}°).`);
+  }
+  const uvLeft = m.hours.slice(i0, i0 + 10).filter(h => h.t < d0.t + DAY);
+  const uvPeak = uvLeft.reduce((a, h) => ((h.uv || 0) > (a.uv || 0) ? h : a), uvLeft[0] || {});
+  if ((uvPeak.uv || 0) >= 6) out.push(`UV élevé ${vers(uvPeak.t, nowL)} : protection conseillée.`);
+  return out.slice(0, 2).join(' ');
+}
+function snapNow() { const keep = state.sel; state.sel = null; const s = snap(); state.sel = keep; return s; }
+
+/* ==========================================================================
+   6. Frise des 48 heures : le curseur qui fait voyager l'interface
+   ========================================================================== */
+const TL = { host: $('#tl-chart'), n: 0, i0: 0, pad: 12, step: 1, Y: null, dragging: false };
+
+function smoothPath(p) {
+  let d = `M${p[0][0].toFixed(1)} ${p[0][1].toFixed(1)}`;
+  for (let i = 0; i < p.length - 1; i++) {
+    const p0 = p[i - 1] || p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] || p2;
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += `C${c1x.toFixed(1)} ${c1y.toFixed(1)} ${c2x.toFixed(1)} ${c2y.toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
+
+function renderTimeline() {
+  const m = state.model; if (!m) return;
+  const host = TL.host, W = host.clientWidth, H = 164;
+  if (!W) return;
+  const i0 = m.nowIdx, n = Math.min(48, m.hours.length - i0);
+  const hs = m.hours.slice(i0, i0 + n);
+  const pad = 12, step = (W - pad * 2) / Math.max(1, n - 1), X = i => pad + i * step;
+  const temps = hs.map(h => h.temp);
+  let lo = Math.min(...temps), hi = Math.max(...temps);
+  if (hi - lo < 4) { const c = (hi + lo) / 2; lo = c - 2; hi = c + 2; }
+  const cT = 48, cH = 50, Y = t => cT + (1 - (t - lo) / (hi - lo)) * cH;
+  const popBase = 136, popH = 20, every = W < 520 ? 6 : 3;
+  Object.assign(TL, { n, i0, pad, step, Y });
+
+  let bands = '';
+  for (let i = 0; i < n;) {
+    if (!hs[i].day) {
+      let j = i; while (j + 1 < n && !hs[j + 1].day) j++;
+      const x0 = Math.max(0, X(i) - step / 2), x1 = Math.min(W, X(j) + step / 2);
+      bands += `<rect class="tl-night" x="${x0.toFixed(1)}" y="30" width="${(x1 - x0).toFixed(1)}" height="${popBase - 28}" rx="8"/>`;
+      i = j + 1;
+    } else i++;
+  }
+  let stops = '';
+  for (let i = 0; i < n; i++) if (i % 2 === 0 || i === n - 1) stops += `<stop offset="${(i / (n - 1)).toFixed(3)}" stop-color="${tempCSS(hs[i].temp)}"/>`;
+  const line = smoothPath(hs.map((h, i) => [X(i), Y(h.temp)]));
+  const area = `${line}L${X(n - 1).toFixed(1)} ${popBase}L${X(0).toFixed(1)} ${popBase}Z`;
+
+  const bw = Math.max(2, step * .56);
+  let bars = '', icons = '', labels = '', mids = '';
+  hs.forEach((h, i) => {
+    const p = (h.pop ?? 0) / 100;
+    if (p > .02) {
+      const bh = Math.max(1.5, p * popH);
+      bars += `<rect x="${(X(i) - bw / 2).toFixed(1)}" y="${(popBase - bh).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="1" fill="#7cc4ff" fill-opacity="${(.25 + .6 * p).toFixed(2)}"/>`;
+    }
+    const hr = hourOf(h.t), x = X(i);
+    if (hr === 0 && i > 0) mids += `<line class="tl-mid" x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="30" y2="${popBase}"/>`;
+    if (hr % every === 0 && x > 14 && x < W - 14) {
+      icons += `<svg class="wx" x="${(x - 11).toFixed(1)}" y="2" width="22" height="22" viewBox="0 0 32 32">${wxInner(h.code, h.day)}</svg>`;
+      labels += hr === 0
+        ? `<text class="tl-lab is-day" x="${x.toFixed(1)}" y="156" text-anchor="middle">${F_WD_SHORT.format(h.t)}</text>`
+        : `<text class="tl-lab" x="${x.toFixed(1)}" y="156" text-anchor="middle">${hr} h</text>`;
+    }
+  });
+  const iMax = temps.indexOf(Math.max(...temps)), iMin = temps.indexOf(Math.min(...temps));
+  const lx = i => clamp(X(i), 16, W - 16).toFixed(1);
+  const extremes = `<text class="tl-t" x="${lx(iMax)}" y="${(Y(temps[iMax]) - 9).toFixed(1)}" text-anchor="middle">${fmtT(temps[iMax])}</text>` +
+    (iMin !== iMax ? `<text class="tl-t" x="${lx(iMin)}" y="${(Y(temps[iMin]) + 19).toFixed(1)}" text-anchor="middle">${fmtT(temps[iMin])}</text>` : '');
+
+  host.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">
+    <defs>
+      <linearGradient id="tl-g" gradientUnits="userSpaceOnUse" x1="${X(0)}" x2="${X(n - 1)}" y1="0" y2="0">${stops}</linearGradient>
+      <linearGradient id="tl-a" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".22"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+      <mask id="tl-m"><path d="${area}" fill="url(#tl-a)"/></mask>
+    </defs>
+    ${bands}${mids}
+    <rect x="0" y="0" width="${W}" height="${popBase}" fill="url(#tl-g)" mask="url(#tl-m)"/>
+    <path class="tl-line${state.placeChanged && !reduced ? ' draw' : ''}" d="${line}" stroke="url(#tl-g)" pathLength="1"/>
+    ${bars}${icons}${labels}${extremes}
+    <g class="tl-cur" id="tl-cur"><line x1="0" x2="0" y1="28" y2="${popBase + 4}"/><circle id="tl-dot" cx="0" cy="0" r="5.5"/></g>
+  </svg>`;
+  host.setAttribute('aria-valuemax', n - 1);
+  updateCursor(true);
+}
+
+function updateCursor(instant) {
+  const m = state.model; if (!m || !TL.Y) return;
+  const i = (state.sel ?? m.nowIdx) - TL.i0;
+  const h = m.hours[TL.i0 + i];
+  const x = TL.pad + i * TL.step, y = clamp(TL.Y(h.temp), 40, 104);
+  const g = $('#tl-cur'), dot = $('#tl-dot');
+  if (!g) return;
+  if (instant) { g.style.transition = 'none'; dot.style.transition = 'none'; }
+  g.style.transform = `translateX(${x}px)`;
+  dot.style.transform = `translateY(${y}px)`;
+  if (instant) { g.getBoundingClientRect(); g.style.transition = ''; dot.style.transition = ''; }
+
+  const s = snap(), nowL = nowLocal();
+  const label = s.live ? 'Maintenant' : cap(whenLabel(s.t, nowL));
+  const detail = `${fmtT(s.temp)}, ${wmo(s.code)[0].toLowerCase()}, pluie ${s.pop ?? 0} %`;
+  $('#tl-readout').innerHTML = `<strong>${label}</strong>${esc(detail)}`;
+  TL.host.setAttribute('aria-valuenow', i);
+  TL.host.setAttribute('aria-valuetext', `${label} : ${detail}`);
+}
+
+let selRaf = 0;
+function setSel(idx) {
+  const m = state.model; if (!m) return;
+  idx = clamp(Math.round(idx), m.nowIdx, Math.min(m.hours.length - 1, m.nowIdx + TL.n - 1));
+  const v = idx === m.nowIdx ? null : idx;
+  if (v === state.sel) return;
+  state.sel = v;
+  if (!selRaf) selRaf = requestAnimationFrame(() => {
+    selRaf = 0;
+    renderHero(); updateSky(); updateCursor(); renderInstruments();
+  });
+}
+function pickFromPointer(e) {
+  const r = TL.host.getBoundingClientRect();
+  setSel(TL.i0 + (e.clientX - r.left - TL.pad) / TL.step);
+}
+TL.host.addEventListener('pointerdown', e => {
+  if (!state.model || e.button > 0) return;
+  TL.dragging = true; TL.host.classList.add('dragging');
+  TL.host.setPointerCapture(e.pointerId);
+  pickFromPointer(e);
+});
+TL.host.addEventListener('pointermove', e => { if (TL.dragging) pickFromPointer(e); });
+const endDrag = () => { TL.dragging = false; TL.host.classList.remove('dragging'); };
+TL.host.addEventListener('pointerup', endDrag);
+TL.host.addEventListener('pointercancel', endDrag);
+TL.host.addEventListener('keydown', e => {
+  const m = state.model; if (!m) return;
+  const cur = state.sel ?? m.nowIdx;
+  const map = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1, PageUp: 6, PageDown: -6 };
+  if (e.key in map) setSel(cur + map[e.key]);
+  else if (e.key === 'Home') setSel(m.nowIdx);
+  else if (e.key === 'End') setSel(m.nowIdx + TL.n - 1);
+  else return;
+  e.preventDefault();
+});
+$('#back-now').addEventListener('click', () => state.model && setSel(state.model.nowIdx));
+
+/* ==========================================================================
+   7. Meilleurs créneaux : un score transparent par activité et par heure
+   ========================================================================== */
+function band(x, lo, hi, min, max) {
+  if (x == null || !isFinite(x)) return .6;
+  if (x >= lo && x <= hi) return 1;
+  return x < lo ? clamp((x - min) / (lo - min), 0, 1) : clamp((max - x) / (max - hi), 0, 1);
+}
+const dry = h => (1 - (h.pop ?? 0) / 100 * .85) * ((h.precip || 0) > .2 ? .25 : 1);
+const fct = (v, why) => ({ v: clamp(v, 0, 1), why });
+function golden(t) {
+  const d = dayOf(t); if (!d || !isFinite(d.sunrise)) return 0;
+  const wins = [[d.sunrise - 30 * 6e4, d.sunrise + 60 * 6e4], [d.sunset - 60 * 6e4, d.sunset + 30 * 6e4]];
+  return wins.reduce((o, [a, b]) => o + Math.max(0, Math.min(b, t + HOUR) - Math.max(a, t)), 0) / HOUR;
+}
+const windTxt = h => `vent ${U.wind(h.wind)} ${U.windUnit()}`;
+
+const ACTS = [
+  {
+    id: 'run', max: 3, name: 'Course à pied',
+    f: h => [fct(band(h.app, 6, 17, -6, 30), h.app < 6 ? 'le froid' : 'la chaleur'), fct(dry(h), 'la pluie'),
+      fct(band(h.wind, 0, 20, 0, 50) * ((h.gust || 0) > 60 ? .5 : 1), 'le vent'), fct(h.day ? 1 : .7, "l'obscurité"),
+      fct(band(h.uv, 0, 6, 0, 11), 'les UV')],
+    why: h => `${fmtT(h.app)} ressentis, ${windTxt(h)}, pluie ${h.pop ?? 0} %`,
+  },
+  {
+    id: 'bike', max: 4, name: 'Vélo',
+    f: h => [fct(band(h.app, 12, 25, 2, 34), h.app < 12 ? 'le froid' : 'la chaleur'), fct(Math.pow(dry(h), 1.3), 'la pluie'),
+      fct(band(h.wind, 0, 14, 0, 38) * ((h.gust || 0) > 45 ? .4 : 1), 'le vent'), fct(h.day ? 1 : .45, "l'obscurité")],
+    why: h => `${windTxt(h)} (rafales ${U.wind(h.gust)}), ${fmtT(h.app)} ressentis`,
+  },
+  {
+    id: 'terrace', max: 4, name: 'Terrasse ou pique-nique',
+    f: h => [fct(h.day ? 1 : 0, 'la nuit'), fct(band(h.app, 19, 27, 11, 34), h.app < 19 ? 'la fraîcheur' : 'la chaleur'),
+      fct(Math.pow(dry(h), 1.5), 'la pluie'), fct(band(h.wind, 0, 16, 0, 35), 'le vent'), fct(1 - (h.cloud ?? 0) / 100 * .5, 'les nuages')],
+    why: h => `${fmtT(h.app)} ressentis, ${wmo(h.code)[0].toLowerCase()}`,
+  },
+  {
+    id: 'laundry', max: 6, name: 'Linge dehors',
+    f: h => [fct(h.day ? 1 : 0, 'la nuit'), fct(((h.precip || 0) > .05 ? 0 : 1) * clamp(1 - ((h.pop ?? 0) - 10) / 40, 0, 1), 'la pluie'),
+      fct(band(h.rh, 0, 60, 0, 97), "l'humidité"), fct(band(h.wind, 6, 30, 0, 55), h.wind < 6 ? "l'absence de vent" : 'le vent'),
+      fct(band(h.temp, 15, 32, 2, 40), 'la fraîcheur')],
+    why: h => `humidité ${h.rh ?? '–'} %, ${windTxt(h)}, pluie ${h.pop ?? 0} %`,
+  },
+  {
+    id: 'photo', max: 2, name: "Photo à l'heure dorée",
+    f: h => {
+      const c = h.cloud ?? 0;
+      const sky = c < 15 ? .7 + .3 * c / 15 : c <= 65 ? 1 : 1 - .9 * (c - 65) / 35;
+      return [fct(golden(h.t) * 1.5, "l'heure"), fct(sky, c > 65 ? 'un ciel trop couvert' : 'un ciel sans relief'), fct(dry(h), 'la pluie')];
+    },
+    why: h => {
+      const d = dayOf(h.t), ev = Math.abs(h.t - d.sunrise) < Math.abs(h.t - d.sunset) ? ['Lever', d.sunrise] : ['Coucher', d.sunset];
+      return `${ev[0]} du soleil à ${fmtClock(ev[1])}, nuages ${h.cloud ?? 0} %`;
+    },
+  },
+  {
+    id: 'stars', max: 4, name: 'Observer les étoiles',
+    f: h => {
+      const moon = moonPhase(h.t - state.model.offset);
+      return [fct(sunState(h.t + HOUR / 2).h <= -.4 ? 1 : 0, 'le manque d’obscurité'), fct(band(h.cloud, 0, 10, 0, 60), 'les nuages'),
+        fct(1 - moon.illum * .55, 'la lune'), fct((h.pop ?? 0) < 15 && !(h.precip > 0) ? 1 : .3, 'la pluie'), fct(band(h.rh, 0, 80, 0, 100), "l'humidité")];
+    },
+    why: h => `nuages ${h.cloud ?? 0} %, lune éclairée à ${Math.round(moonPhase(h.t - state.model.offset).illum * 100)} %`,
+  },
+];
+
+function bestWindow(sc, maxLen) {
+  // Plage continue au-dessus du seuil, limitée à maxLen heures ; la somme des carrés
+  // favorise les heures vraiment bonnes plutôt que les longues plages moyennes.
+  for (const th of [.6, .45]) {
+    let best = null;
+    for (let i = 0; i < sc.length;) {
+      if (sc[i] < th) { i++; continue; }
+      let j = i; while (j < sc.length && sc[j] >= th) j++;
+      const L = Math.min(maxLen, j - i);
+      for (let a = i; a + L <= j; a++) {
+        let sum = 0; for (let k = a; k < a + L; k++) sum += sc[k] * sc[k];
+        if (!best || sum > best.sum + 1e-9) best = { a, b: a + L - 1, sum };
+      }
+      i = j;
+    }
+    if (best) {
+      let peak = best.a;
+      for (let k = best.a; k <= best.b; k++) if (sc[k] > sc[peak]) peak = k;
+      return { ...best, peak };
+    }
+  }
+  return null;
+}
+function windowLabel(hs, a, b, nowL) {
+  const s = hs[a].t, e = hs[b].t + HOUR;
+  const start = a === 0 ? 'Maintenant' : `${cap(dayLabel(s, nowL))} ${fmtH(s)}`;
+  const endMid = hourOf(e) === 0;
+  const sameDay = Math.floor(s / DAY) === Math.floor((e - 1) / DAY);
+  const end = endMid ? 'minuit' : fmtH(e);
+  return sameDay ? `${start} – ${end}` : `${start} – ${dayLabel(e, nowL)} ${end}`;
+}
+
+function renderActivities() {
+  const m = state.model, i0 = m.nowIdx, nowL = nowLocal();
+  const hs = m.hours.slice(i0, i0 + 48);
+  $('#acts').innerHTML = ACTS.map(act => {
+    const rows = hs.map(h => { const f = act.f(h); return { h, f, s: f.reduce((p, x) => p * x.v, 1) }; });
+    const sc = rows.map(r => r.s);
+    const win = bestWindow(sc, act.max);
+    const peakI = win ? win.peak : sc.indexOf(Math.max(...sc));
+    const peak = rows[peakI];
+    const weakest = peak.f.reduce((a, x) => (x.v < a.v ? x : a), peak.f[0]);
+    const score = Math.round(peak.s * 100);
+    const rating = !win ? 'Déconseillé' : peak.s >= .8 ? 'Idéal' : peak.s >= .6 ? 'Bon' : 'Correct';
+    const when = win ? windowLabel(hs, win.a, win.b, nowL) : "Pas de bon créneau d'ici 48 h";
+    const why = win
+      ? `${cap(act.why(peak.h))}.${weakest.v < .75 ? ` Point faible : ${weakest.why}.` : ''}`
+      : `Principal frein : ${weakest.why}.`;
+    const cells = rows.map((r, i) => {
+      const inWin = win && i >= win.a && i <= win.b;
+      const mid = i > 0 && hourOf(r.h.t) === 0;
+      return `<i class="${inWin ? 'w' : ''}${mid ? ' mid' : ''}" style="--s:${(.08 + .72 * r.s).toFixed(2)}"></i>`;
+    }).join('');
+    return `<li><button type="button" class="act${win ? '' : ' is-none'}" data-idx="${i0 + peakI}"
+        aria-label="${esc(`${act.name} : ${rating}. ${when}. Voir ce moment dans le ciel.`)}">
+      <span class="act-ic" aria-hidden="true"><svg viewBox="0 0 32 32">${ACT_IC[act.id]}</svg></span>
+      <span class="act-name">${act.name}</span>
+      <span class="act-when">${when}</span>
+      <span class="act-score"><b>${rating}</b><span>${score}/100</span></span>
+      <span class="act-strip" aria-hidden="true">${cells}</span>
+      <span class="act-why">${esc(why)}</span>
+    </button></li>`;
+  }).join('');
+}
+$('#acts').addEventListener('click', e => {
+  const b = e.target.closest('.act'); if (!b) return;
+  setSel(+b.dataset.idx);
+  if (innerWidth <= 960) $('#hero').scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+});
+
+/* ==========================================================================
+   8. Les 7 prochains jours
+   ========================================================================== */
+function renderWeek() {
+  const m = state.model, days = m.days.slice(0, 7);
+  const lo = Math.min(...days.map(d => d.min)), hi = Math.max(...days.map(d => d.max)), span = hi - lo || 1;
+  const curT = snapNow().temp;
+  $('#week').innerHTML = days.map((d, i) => {
+    const name = i === 0 ? "Aujourd'hui" : i === 1 ? 'Demain' : cap(F_WEEKDAY.format(d.t));
+    const l = (d.min - lo) / span * 100, r = (hi - d.max) / span * 100;
+    const dot = i === 0 && curT != null ? `<b style="left:${clamp((curT - lo) / span * 100, l, 100 - r).toFixed(1)}%"></b>` : '';
+    const dl = isFinite(d.daylight) && d.daylight != null ? `${Math.floor(d.daylight / 3600)} h ${String(Math.round(d.daylight % 3600 / 60)).padStart(2, '0')}` : '–';
+    return `<li class="day">
+      <button type="button" class="day-btn" aria-expanded="false" aria-controls="dm-${i}">
+        <span class="d-name">${name}</span>
+        <span class="d-ic">${wxIcon(d.code, 1)}<span class="sr-only">${wmo(d.code)[0]}</span></span>
+        <span class="d-pop">${(d.pop ?? 0) >= 20 ? `${IC_DROP}${d.pop} %` : ''}</span>
+        <span class="d-min"><span class="sr-only">minimale </span>${fmtT(d.min)}</span>
+        <span class="rb" aria-hidden="true"><i style="left:${l.toFixed(1)}%;right:${r.toFixed(1)}%;background:linear-gradient(90deg,${tempCSS(d.min)},${tempCSS(d.max)})"></i>${dot}</span>
+        <span class="d-max"><span class="sr-only">maximale </span>${fmtT(d.max)}</span>
+      </button>
+      <div class="day-more" id="dm-${i}"><div>
+        <dl class="dm">
+          <div class="dm-cond"><dt class="sr-only">Conditions</dt><dd>${wmo(d.code)[0]}</dd></div>
+          <div><dt>Lever</dt><dd>${isFinite(d.sunrise) ? fmtClock(d.sunrise) : '–'}</dd></div>
+          <div><dt>Coucher</dt><dd>${isFinite(d.sunset) ? fmtClock(d.sunset) : '–'}</dd></div>
+          <div><dt>Durée du jour</dt><dd>${dl}</dd></div>
+          <div><dt>Pluie</dt><dd>${nf1.format(d.precip || 0)} mm (${d.pop ?? 0} %)</dd></div>
+          <div><dt>Vent max</dt><dd>${U.wind(d.windMax)} ${U.windUnit()} (rafales ${U.wind(d.gustMax)})</dd></div>
+          <div><dt>UV max</dt><dd>${Math.round(d.uvMax || 0)}</dd></div>
+        </dl>
+      </div></div>
+    </li>`;
+  }).join('');
+}
+$('#week').addEventListener('click', e => {
+  const b = e.target.closest('.day-btn'); if (!b) return;
+  const li = b.parentElement, open = !li.classList.contains('open');
+  li.classList.toggle('open', open);
+  b.setAttribute('aria-expanded', open);
+});
+
+/* ==========================================================================
+   9. Instruments (suivent le curseur temporel)
+   ========================================================================== */
+const DIRS = ['du nord', 'du nord-est', "d'est", 'du sud-est', 'du sud', 'du sud-ouest', "d'ouest", 'du nord-ouest'];
+const windFrom = d => DIRS[Math.round(((d % 360) + 360) % 360 / 45) % 8];
+function beaufort(k) {
+  const b = [[1, 'Calme'], [6, 'Très légère brise'], [12, 'Légère brise'], [20, 'Petite brise'], [29, 'Jolie brise'], [39, 'Bonne brise'],
+    [50, 'Vent frais'], [62, 'Grand frais'], [75, 'Coup de vent'], [89, 'Fort coup de vent'], [103, 'Tempête'], [118, 'Violente tempête']];
+  for (const [lim, name] of b) if (k < lim) return name;
+  return 'Ouragan';
+}
+const uvLabel = u => (u < 3 ? 'Faible' : u < 6 ? 'Modéré' : u < 8 ? 'Élevé' : u < 11 ? 'Très élevé' : 'Extrême');
+const AQ = [[20, 'Bon', 'Air de bonne qualité.'], [40, 'Correct', 'Aucune précaution particulière.'], [60, 'Moyen', 'Les personnes sensibles peuvent ressentir une gêne.'],
+  [80, 'Médiocre', 'Limitez les efforts prolongés en extérieur.'], [100, 'Très mauvais', 'Évitez les efforts en extérieur.'], [Infinity, 'Extrêmement mauvais', 'Restez à l’intérieur si possible.']];
+let windAngle = null;
+
+function renderInstruments() {
+  const m = state.model; if (!m) return;
+  const s = snap(), nowL = nowLocal(), d = dayOf(s.t);
+  $('#inst-lede').textContent = s.live ? 'Conditions actuelles.' : `Prévision pour ${whenLabel(s.t, nowL)}.`;
+
+  // Vent
+  $('#wind-v').textContent = U.wind(s.wind);
+  $('#wind-u').textContent = U.windUnit();
+  const target = (s.dir ?? 0) + 180;
+  windAngle = windAngle == null ? target : windAngle + (((target - windAngle) % 360 + 540) % 360 - 180);
+  $('#wind-arrow').style.transform = `rotate(${windAngle}deg)`;
+  $('#wind-c').textContent = `${beaufort(s.wind ?? 0)} ${windFrom(s.dir ?? 0)}. Rafales à ${U.wind(s.gust)} ${U.windUnit()}.`;
+
+  // UV
+  const uv = s.uv || 0;
+  $('#uv-v').textContent = Math.round(uv);
+  $('#uv-l').textContent = uvLabel(uv);
+  $('#uv-needle').style.transform = `rotate(${clamp(uv / 11, 0, 1) * 180 - 90}deg)`;
+  const dayHours = m.hours.filter(h => h.t >= d.t && h.t < d.t + DAY);
+  const uvPeak = dayHours.reduce((a, h) => ((h.uv || 0) > (a.uv || 0) ? h : a), dayHours[0] || { uv: 0 });
+  $('#uv-c').textContent = !s.day
+    ? `Pas d'UV la nuit. Maximum ${Math.round(d.uvMax || 0)} dans la journée.`
+    : `${uv >= 3 ? 'Protection conseillée.' : 'Pas de protection nécessaire.'} Pic à ${Math.round(uvPeak.uv || 0)} vers ${fmtH(uvPeak.t)}.`;
+
+  // Humidité
+  const rh = s.rh ?? 0;
+  $('#hum-v').textContent = Math.round(rh);
+  const dew = s.dew;
+  $('#hum-l').textContent = dew != null && dew >= 24 ? 'Étouffant' : dew != null && dew >= 20 ? 'Lourd' : dew != null && dew >= 16 ? 'Un peu lourd'
+    : rh >= 90 ? 'Très humide' : rh >= 75 ? 'Humide' : rh < 30 ? 'Air sec' : 'Confortable';
+  $('#hum-water').style.transform = `translateY(${(57 - 50 * rh / 100).toFixed(1)}px)`;
+  $('#hum-c').textContent = dew == null ? '' : `Point de rosée : ${fmtT(dew)}.`;
+
+  // Pression
+  const pres = s.pres;
+  const ref = m.hours[s.idx - 3] || null, nxt = m.hours[s.idx + 3] || null;
+  const diff = ref && ref.pres != null && pres != null ? pres - ref.pres : (nxt && nxt.pres != null && pres != null ? nxt.pres - pres : 0);
+  $('#pres-v').textContent = pres == null ? '–' : Math.round(pres);
+  $('#pres-l').textContent = diff >= 1.5 ? 'En hausse' : diff <= -1.5 ? 'En baisse' : 'Stable';
+  $('#pres-needle').style.transform = `rotate(${(clamp(((pres ?? 1013) - 970) / 80, 0, 1) * 180 - 90).toFixed(1)}deg)`;
+  $('#pres-c').textContent = diff >= 1.5 ? 'Sur 3 h : tendance à l’amélioration.' : diff <= -1.5 ? 'Sur 3 h : dégradation possible.' : 'Peu de variation sur 3 h.';
+
+  // Visibilité
+  const vis = s.vis;
+  if (vis == null) { $('#vis-v').textContent = '–'; $('#vis-l').textContent = ''; $('#vis-c').textContent = 'Donnée indisponible ici.'; }
+  else {
+    const km = vis / 1000, val = U.imperial ? km * .621371 : km;
+    $('#vis-v').textContent = val >= 10 ? Math.round(val) : nf1.format(val);
+    $('#vis-u').textContent = U.imperial ? 'mi' : 'km';
+    $('#vis-l').textContent = km >= 20 ? 'Excellente' : km >= 10 ? 'Bonne' : km >= 4 ? 'Moyenne' : km >= 1 ? 'Faible' : 'Très faible';
+    $('#vis-c').textContent = km >= 10 ? 'Horizon bien dégagé.' : km >= 1 ? 'Brume ou précipitations.' : 'Brouillard : prudence sur la route.';
+  }
+
+  // Lune
+  const moon = moonPhase(s.t - m.offset);
+  $('#moon-v').textContent = Math.round(moon.illum * 100);
+  $('#moon-l').textContent = moonName(moon.p);
+  const mp = moonPath(moon.p, 32, 32, 24, state.place.lat < 0);
+  const lit = $('#moon-lit');
+  lit.setAttribute('d', mp.d);
+  lit.setAttribute('transform', mp.flip ? 'translate(64 0) scale(-1 1)' : '');
+  const toFull = ((.5 - moon.p + 1) % 1) * 29.530588853;
+  $('#moon-c').textContent = toFull < 1 || toFull > 28.5 ? 'Pleine lune en ce moment.' : `Prochaine pleine lune le ${F_DM.format(s.t + toFull * DAY)}.`;
+
+  // Soleil
+  const sr = d.sunrise, ss = d.sunset;
+  if (isFinite(sr) && isFinite(ss)) {
+    const p = clamp((s.t - sr) / (ss - sr), 0, 1);
+    const up = s.t >= sr && s.t <= ss;
+    const arc = $('#sun-fg');
+    arc.setAttribute('stroke-dasharray', `${p.toFixed(3)} 1`);
+    let x = 30, y = 88;
+    try { const L = arc.getTotalLength(), pt = arc.getPointAtLength(p * L); x = pt.x; y = pt.y; } catch { /* rendu non prêt */ }
+    const dot = $('#sun-dot');
+    dot.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+    dot.style.opacity = up ? 1 : .35;
+    $('#sun-rise').textContent = fmtClock(sr);
+    $('#sun-set').textContent = fmtClock(ss);
+    const dlen = (ss - sr) / 6e4;
+    const nextD = m.days[m.days.indexOf(d) + 1];
+    const delta = nextD && isFinite(nextD.sunset) ? Math.round((nextD.sunset - nextD.sunrise) / 6e4 - dlen) : 0;
+    const deltaTxt = delta === 0 ? 'autant le lendemain' : `${Math.abs(delta)} min de ${delta > 0 ? 'plus' : 'moins'} le lendemain`;
+    $('#sun-c').textContent = `${Math.floor(dlen / 60)} h ${String(Math.round(dlen % 60)).padStart(2, '0')} de jour, ${deltaTxt}.`;
+  } else {
+    $('#sun-c').textContent = 'Pas de lever ni de coucher du soleil ce jour-là à cette latitude.';
+  }
+
+  // Qualité de l'air
+  const aqRow = state.aq && (state.aq.get(m.hours[s.idx].iso) || state.aq.get(m.hours[m.nowIdx].iso));
+  if (aqRow && aqRow.aqi != null) {
+    const cat = AQ.find(c => aqRow.aqi < c[0]);
+    $('#aq-v').textContent = Math.round(aqRow.aqi);
+    $('#aq-l').textContent = cat[1];
+    $('#aq-c').textContent = cat[2];
+    $('#aq-dot').style.left = `${clamp(aqRow.aqi / 120, 0, 1) * 100}%`;
+    const pol = [['PM2,5', aqRow.pm25], ['PM10', aqRow.pm10], ['Ozone', aqRow.o3], ['NO₂', aqRow.no2]];
+    $('#aq-pol').innerHTML = pol.map(([k, v]) => `<div><dt>${k}</dt><dd>${v == null ? '–' : Math.round(v)} <small>µg/m³</small></dd></div>`).join('');
+  } else {
+    $('#aq-v').textContent = '–';
+    $('#aq-l').textContent = '';
+    $('#aq-c').textContent = state.aqFailed ? "Données indisponibles pour ce lieu." : 'Chargement…';
+    $('#aq-pol').innerHTML = '';
+  }
+}
+
+/* ==========================================================================
+   10. Mémoire du climat (archives ERA5, 30 ans)
+   ========================================================================== */
+function computeClimate(j, todayIso) {
+  const map = new Map();
+  j.daily.time.forEach((t, i) => { const v = j.daily.temperature_2m_max[i]; if (v != null) map.set(t, v); });
+  const [Y, M, D] = todayIso.split('-').map(Number);
+  const years = [], all = [];
+  for (let y = Y - 30; y <= Y - 1; y++) {
+    const c = Date.UTC(y, M - 1, M === 2 && D === 29 ? 28 : D);
+    const vals = [];
+    for (let k = -7; k <= 7; k++) {
+      const v = map.get(new Date(c + k * DAY).toISOString().slice(0, 10));
+      if (v != null) { vals.push(v); all.push(v); }
+    }
+    if (vals.length >= 5) years.push({ y, mean: avg(vals) });
+  }
+  if (all.length < 60 || years.length < 10) throw new Error('Archives insuffisantes');
+  const normal = avg(all);
+  const xm = avg(years.map(o => o.y)), ym = avg(years.map(o => o.mean));
+  let num = 0, den = 0;
+  years.forEach(o => { num += (o.y - xm) * (o.mean - ym); den += (o.y - xm) ** 2; });
+  return { years, all: all.map(v => Math.round(v * 10) / 10), normal, slope: den ? num / den * 10 : 0, from: Y - 30, to: Y - 1, iso: todayIso };
+}
+
+async function loadClimate(place, id) {
+  const m = state.model, todayIso = m.days[0].iso;
+  const key = `clim:${keyOf(place)}:${todayIso}${state.demo ? ':demo' : ''}`;
+  let base = store.get(key, null);
+  if (!base) {
+    state.climate = 'loading'; renderClimate();
+    try {
+      const Y = +todayIso.slice(0, 4);
+      const j = state.demo ? Demo.archive(place, Y - 30, Y - 1) : await API.archive(place.lat, place.lon, `${Y - 30}-01-01`, `${Y - 1}-12-31`);
+      base = computeClimate(j, todayIso);
+      store.prune('clim:', todayIso);
+      store.set(key, base);
+    } catch (e) {
+      if (id === state.loadId) { state.climate = { error: true }; renderClimate(); }
+      return;
+    }
+  }
+  if (id !== state.loadId) return;
+  state.climate = base;
+  renderClimate();
+}
+
+function anomColor(a) {
+  const t = clamp(a / 2.5, -1, 1), neutral = [222, 228, 236];
+  return rgba(t < 0 ? mix(neutral, [58, 108, 184], -t) : mix(neutral, [206, 64, 62], t));
+}
+
+function renderClimate() {
+  const el = $('#climate'), c = state.climate;
+  if (!state.model) return;
+  if (c === 'loading' || c == null) {
+    el.innerHTML = `<div class="skeleton" style="height:112px"></div><p class="muted">Lecture de trente ans d'archives…</p>`;
+    return;
+  }
+  if (c.error) {
+    el.innerHTML = `<p class="muted">Les archives climatiques ne sont pas disponibles pour ce lieu pour le moment. Elles seront rechargées à la prochaine visite.</p>`;
+    return;
+  }
+  const today = state.model.days[0].max;
+  const pct = Math.round(c.all.filter(v => v < today).length / c.all.length * 100);
+  const dateTxt = F_DM.format(state.model.days[0].t);
+  const verdict = pct >= 90 ? 'Exceptionnellement chaud pour la saison.' : pct >= 70 ? 'Plus chaud que la normale.' :
+    pct > 30 ? 'Proche des normales de saison.' : pct > 10 ? 'Plus frais que la normale.' : 'Exceptionnellement frais pour la saison.';
+  const slope = U.delta(c.slope);
+  const trend = Math.abs(slope) < .1
+    ? `Pas de tendance nette sur cette quinzaine depuis ${c.from}.`
+    : `Tendance locale sur cette quinzaine : ${slope > 0 ? '+' : '−'}${nf1.format(Math.abs(slope))}° par décennie depuis ${c.from}.`;
+
+  el.innerHTML = `
+    <p class="verdict">${verdict}</p>
+    <p class="muted" style="margin:0;max-width:56ch">Avec ${fmtT(today)} prévus, aujourd'hui s'annonce plus chaud que ${pct} % des journées autour du ${dateTxt} entre ${c.from} et ${c.to}. Normale de saison : ${minus(nf1.format(U.delta(c.normal) + (U.imperial ? 32 : 0)))}°.</p>
+    <div class="dist" id="clim-dist" role="img" aria-label="Répartition des ${c.all.length} maximales observées autour du ${dateTxt} depuis ${c.from}, avec la prévision du jour."></div>
+    <h3 class="clim-h">La même quinzaine, année après année</h3>
+    <div class="stripes" id="stripes" role="img" aria-label="${esc(`Bandes climatiques de ${c.from} à ${c.to}. ${trend}`)}">
+      ${c.years.map(o => `<i data-y="${o.y}" data-v="${o.mean}" style="background:${anomColor(o.mean - c.normal)}"></i>`).join('')}
+    </div>
+    <div class="stripes-axis" aria-hidden="true"><span>${c.from}</span><span class="lg"><i style="background:${anomColor(-2.5)}"></i>plus frais <i style="background:${anomColor(2.5)}"></i>plus chaud que la normale</span><span>${c.to}</span></div>
+    <p class="stripes-read" id="stripes-read">${trend}</p>
+    <p class="note">Chaque bande est la moyenne des maximales sur 15 jours centrés sur le ${dateTxt}. Source : réanalyse ERA5 via Open-Meteo, maille d'environ 25 km. Comparaison indicative.</p>`;
+  renderDist();
+
+  const strip = $('#stripes'), read = $('#stripes-read');
+  let on = null;
+  const show = e => {
+    const r = strip.getBoundingClientRect();
+    const i = clamp(Math.floor((e.clientX - r.left) / r.width * c.years.length), 0, c.years.length - 1);
+    const node = strip.children[i];
+    if (on) on.classList.remove('on');
+    on = node; node.classList.add('on');
+    const o = c.years[i], a = U.delta(o.mean - c.normal);
+    read.textContent = `${o.y} : ${fmtT(o.mean)} en moyenne, ${a >= 0 ? '+' : '−'}${nf1.format(Math.abs(a))}° par rapport à la normale.`;
+  };
+  strip.addEventListener('pointermove', show);
+  strip.addEventListener('pointerdown', show);
+  strip.addEventListener('pointerleave', () => { if (on) on.classList.remove('on'); on = null; read.textContent = trend; });
+}
+
+function renderDist() {
+  const host = $('#clim-dist'), c = state.climate;
+  if (!host || !c || !c.all) return;
+  const W = host.clientWidth, H = 112; if (!W) return;
+  const today = state.model.days[0].max;
+  const lo = Math.min(...c.all, today) - .5, hi = Math.max(...c.all, today) + .5;
+  const X = v => 8 + (v - lo) / (hi - lo) * (W - 16);
+  const bin = 6, cols = new Map();
+  c.all.forEach(v => { const k = Math.round(X(v) / bin); cols.set(k, (cols.get(k) || 0) + 1); });
+  const maxC = Math.max(...cols.values()), gap = Math.min(5.5, 64 / maxC);
+  const seen = new Map();
+  let dots = '';
+  [...c.all].sort((a, b) => a - b).forEach(v => {
+    const k = Math.round(X(v) / bin), n = seen.get(k) || 0; seen.set(k, n + 1);
+    const y = 58 + (n % 2 ? 1 : -1) * Math.ceil(n / 2) * gap;
+    dots += `<circle cx="${(k * bin).toFixed(1)}" cy="${y.toFixed(1)}" r="2.3" fill="${tempCSS(v)}" fill-opacity=".75"/>`;
+  });
+  const tx = X(today), nx = X(c.normal);
+  const anchor = x => (x < 70 ? 'start' : x > W - 70 ? 'end' : 'middle');
+  host.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">
+    <line x1="${nx.toFixed(1)}" x2="${nx.toFixed(1)}" y1="22" y2="96" stroke="rgba(241,244,248,.45)" stroke-dasharray="3 3"/>
+    ${dots}
+    <line x1="${tx.toFixed(1)}" x2="${tx.toFixed(1)}" y1="18" y2="98" stroke="${tempCSS(today)}" stroke-width="2.5"/>
+    <circle cx="${tx.toFixed(1)}" cy="58" r="5" fill="${tempCSS(today)}" stroke="#0f1c2e" stroke-width="2"/>
+    <text x="${tx.toFixed(1)}" y="12" text-anchor="${anchor(tx)}">Aujourd'hui ${fmtT(today)}</text>
+    <text class="n-lab" x="${nx.toFixed(1)}" y="110" text-anchor="${anchor(nx)}">Normale ${fmtT(c.normal)}</text>
+  </svg>`;
+}
+
+/* ==========================================================================
+   11. Lieux enregistrés, recherche, géolocalisation
+   ========================================================================== */
+function renderPlaces() {
+  const nav = $('#places');
+  nav.hidden = !state.favs.length;
+  nav.innerHTML = state.favs.map((f, i) => {
+    const t = state.favTemps.get(keyOf(f));
+    const cur = samePlace(f, state.place);
+    return `<button type="button" class="chip" data-i="${i}"${cur ? ' aria-current="true"' : ''}>
+      <span class="dot" style="background:${t != null ? tempCSS(t) : 'var(--mist)'}"></span>${esc(f.name)}${t != null ? `<span class="chip-t">${fmtT(t)}</span>` : ''}</button>`;
+  }).join('');
+}
+$('#places').addEventListener('click', e => {
+  const b = e.target.closest('.chip'); if (!b) return;
+  const f = state.favs[+b.dataset.i];
+  if (f && !samePlace(f, state.place)) loadPlace(f);
+});
+async function refreshFavTemps() {
+  const favs = state.favs.slice(0, 12); if (!favs.length) return;
+  try {
+    const arr = state.demo ? favs.map(f => Demo.forecast(f)) : [].concat(await API.multi(favs));
+    arr.forEach((j, i) => { if (j && j.current && favs[i]) state.favTemps.set(keyOf(favs[i]), j.current.temperature_2m); });
+    renderPlaces();
+  } catch { /* les puces restent sans température */ }
+}
+$('#fav').addEventListener('click', () => {
+  const p = state.place; if (!p) return;
+  const i = state.favs.findIndex(f => samePlace(f, p));
+  if (i >= 0) state.favs.splice(i, 1);
+  else state.favs.push({ name: p.name, region: p.region, lat: p.lat, lon: p.lon });
+  store.set('favs', state.favs);
+  if (state.model && state.model.current) state.favTemps.set(keyOf(p), state.model.current.temperature_2m);
+  const b = $('#fav'); b.classList.add('bump'); setTimeout(() => b.classList.remove('bump'), 220);
+  renderPlaceHeader(); renderPlaces();
+  toast(i >= 0 ? `${p.name} retiré de vos lieux.` : `${p.name} enregistré dans vos lieux.`);
+});
+
+const Q = $('#q'), LIST = $('#results');
+let results = [], active = -1, searchCtl = null;
+function openList(html) {
+  LIST.innerHTML = html; LIST.hidden = false; Q.setAttribute('aria-expanded', 'true');
+}
+function closeList() {
+  LIST.hidden = true; Q.setAttribute('aria-expanded', 'false'); Q.removeAttribute('aria-activedescendant'); active = -1;
+}
+function paintList() {
+  if (!results.length) {
+    openList(`<li class="empty" role="option" aria-disabled="true">Aucune ville trouvée pour « ${esc(Q.value.trim())} ». Vérifiez l'orthographe ou essayez le nom en anglais.</li>`);
+    return;
+  }
+  openList(results.map((r, i) => `<li role="option" id="opt-${i}" data-i="${i}" aria-selected="${i === active}">
+    <span class="r-name">${esc(r.name)}</span><span class="r-reg">${esc(r.region)}</span></li>`).join(''));
+  if (active >= 0) Q.setAttribute('aria-activedescendant', `opt-${active}`);
+}
+const runSearch = debounce(async () => {
+  const v = Q.value.trim();
+  if (v.length < 2) { closeList(); return; }
+  if (searchCtl) searchCtl.abort();
+  searchCtl = new AbortController();
+  try {
+    if (state.demo) results = Demo.geocode(v);
+    else {
+      const j = await API.geocode(v, searchCtl.signal);
+      results = (j.results || []).map(r => ({
+        name: r.name, region: [r.admin1, r.country].filter(Boolean).join(', '), lat: r.latitude, lon: r.longitude,
+      }));
+    }
+    active = results.length ? 0 : -1;
+    if (document.activeElement === Q) paintList();
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    results = Demo.geocode(v);
+    active = results.length ? 0 : -1;
+    paintList();
+  }
+}, 220);
+function choose(i) {
+  const r = results[i]; if (!r) return;
+  Q.value = ''; closeList(); Q.blur();
+  loadPlace(r);
+}
+Q.addEventListener('input', runSearch);
+Q.addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (!results.length) return;
+    active = (active + (e.key === 'ArrowDown' ? 1 : -1) + results.length) % results.length;
+    paintList(); e.preventDefault();
+  } else if (e.key === 'Enter') { if (active >= 0) choose(active); e.preventDefault(); }
+  else if (e.key === 'Escape') { if (!LIST.hidden) closeList(); else { Q.value = ''; Q.blur(); } }
+});
+Q.addEventListener('blur', () => setTimeout(closeList, 120));
+Q.addEventListener('focus', () => { if (Q.value.trim().length >= 2 && results.length) paintList(); });
+LIST.addEventListener('mousedown', e => e.preventDefault());
+LIST.addEventListener('click', e => { const li = e.target.closest('li[data-i]'); if (li) choose(+li.dataset.i); });
+document.addEventListener('keydown', e => {
+  if (e.key === '/' && !/input|textarea/i.test(document.activeElement.tagName)) { e.preventDefault(); Q.focus(); }
+});
+
+$('#locate').addEventListener('click', () => {
+  const b = $('#locate');
+  if (!navigator.geolocation) { toast("La géolocalisation n'est pas disponible sur ce navigateur. Cherchez une ville à la place."); return; }
+  b.classList.add('busy');
+  navigator.geolocation.getCurrentPosition(pos => {
+    b.classList.remove('busy');
+    const { latitude: lat, longitude: lon } = pos.coords;
+    const f = (v, a, b2) => `${nf1.format(Math.abs(v))}° ${v >= 0 ? a : b2}`;
+    loadPlace({ name: 'Ma position', region: `${f(lat, 'N', 'S')}, ${f(lon, 'E', 'O')}`, lat, lon });
+  }, err => {
+    b.classList.remove('busy');
+    toast(err.code === 1
+      ? 'Accès à la position refusé. Autorisez-le dans les réglages du navigateur, ou cherchez une ville.'
+      : 'Position introuvable pour le moment. Réessayez, ou cherchez une ville.');
+  }, { timeout: 10000, maximumAge: 6e5 });
+});
+
+$('#units').addEventListener('click', () => {
+  U.imperial = !U.imperial;
+  store.set('units', U.imperial ? 'imperial' : 'metric');
+  paintUnits();
+  if (state.model) { $('#temp').dataset.v = ''; renderAll(); }
+});
+function paintUnits() {
+  const b = $('#units');
+  b.textContent = U.imperial ? '°F' : '°C';
+  b.setAttribute('aria-label', U.imperial ? 'Unités : Fahrenheit. Passer en Celsius.' : 'Unités : Celsius. Passer en Fahrenheit.');
+  b.title = U.imperial ? 'Passer en °C et km/h' : 'Passer en °F et mph';
+}
+
+/* ==========================================================================
+   12. Notifications
+   ========================================================================== */
+let toastTimer = 0;
+function toast(msg, action) {
+  const el = $('#toast');
+  el.innerHTML = `<span>${esc(msg)}</span>${action ? `<button type="button">${esc(action.label)}</button>` : ''}`;
+  if (action) el.querySelector('button').onclick = () => { el.classList.remove('show'); action.run(); };
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), action ? 9000 : 4000);
+}
+
+/* ==========================================================================
+   13. Chargement d'un lieu
+   ========================================================================== */
+function renderAll() {
+  renderPlaceHeader(); renderHero(); updateSky(); renderTimeline();
+  renderActivities(); renderWeek(); renderInstruments(); renderPlaces(); renderClimate();
+  $('#insight').textContent = insight();
+  const s = snapNow();
+  document.title = `${fmtT(s.temp)} à ${state.place.name} · Aura`;
+}
+
+async function loadPlace(place, { refresh = false } = {}) {
+  const id = ++state.loadId;
+  const changed = !samePlace(place, state.place);
+  state.place = place;
+  store.set('last', place);
+  try {
+    const u = new URL(location.href);
+    u.search = qs({ lat: (+place.lat).toFixed(4), lon: (+place.lon).toFixed(4), name: place.name, region: place.region || '' });
+    history.replaceState(null, '', u);
+  } catch { /* fichier local : URL non modifiable */ }
+  renderPlaceHeader(); renderPlaces();
+  if (!refresh) document.body.classList.add('is-loading');
+  try {
+    const f = state.demo ? Demo.forecast(place) : await API.forecast(place.lat, place.lon);
+    if (id !== state.loadId) return;
+    state.model = buildModel(f);
+    state.sel = null;
+    state.placeChanged = changed || !refresh;
+    if (changed) { state.aq = null; state.aqFailed = false; state.climate = null; }
+    renderAll();
+    state.placeChanged = false;
+    document.body.classList.remove('is-loading');
+    document.body.classList.add('ready');
+    if (!refresh) $('#live').textContent = `Météo à ${place.name} : ${fmtT(snapNow().temp)}, ${wmo(snapNow().code)[0]}.`;
+    loadAir(place, id);
+    if (changed || !state.climate || state.climate.error) loadClimate(place, id);
+    refreshFavTemps();
+  } catch (e) {
+    if (id !== state.loadId) return;
+    console.warn('[Aura]', e);
+    document.body.classList.remove('is-loading');
+    if (!state.model && !state.demo) { enterDemo(); loadPlace(place); return; }
+    if (refresh) return;
+    toast(`Impossible de charger la météo de ${place.name}. ${e instanceof NetworkError ? 'Vérifiez votre connexion.' : e.message}`,
+      { label: 'Réessayer', run: () => loadPlace(place) });
+  }
+}
+
+async function loadAir(place, id) {
+  try {
+    const j = state.demo ? Demo.air(place) : await API.air(place.lat, place.lon);
+    if (id !== state.loadId) return;
+    const H = j.hourly, map = new Map();
+    H.time.forEach((t, i) => map.set(t, { aqi: H.european_aqi[i], pm25: H.pm2_5[i], pm10: H.pm10[i], o3: H.ozone[i], no2: H.nitrogen_dioxide[i] }));
+    state.aq = map; state.aqFailed = false;
+  } catch {
+    if (id !== state.loadId) return;
+    state.aq = null; state.aqFailed = true;
+  }
+  renderInstruments();
+}
+
+function enterDemo() {
+  state.demo = true;
+  $('#demo').hidden = false;
+}
+$('#demo-retry').addEventListener('click', () => {
+  state.demo = false; state.model = null;
+  $('#demo').hidden = true;
+  loadPlace(state.place);
+});
+
+/* Horloge : met à jour l'heure, la position du soleil et l'heure courante de la frise. */
+setInterval(() => {
+  if (!state.model || document.hidden) return;
+  const m = state.model, idx = findNowIdx(m.hours, nowLocal());
+  if (idx !== m.nowIdx) {
+    m.nowIdx = idx;
+    if (state.sel != null && state.sel <= idx) state.sel = null;
+    renderAll();
+  } else if (state.sel == null) { renderHero(); updateSky(); }
+}, 60e3);
+/* Rafraîchissement des données toutes les 15 minutes (pas de requête si l'onglet est caché). */
+setInterval(() => { if (state.place && !document.hidden && !state.demo) loadPlace(state.place, { refresh: true }); }, 15 * 60e3);
+
+const relayout = debounce(() => { if (state.model) { renderTimeline(); renderDist(); } Sky.resize(); }, 150);
+addEventListener('resize', relayout);
+
+/* ==========================================================================
+   14. Mode démonstration (si l'API est injoignable : données simulées réalistes)
+   ========================================================================== */
+const Demo = {
+  cities: [
+    ['Paris', 'Île-de-France, France', 48.8534, 2.3488], ['Lyon', 'Auvergne-Rhône-Alpes, France', 45.7485, 4.8467],
+    ['Marseille', "Provence-Alpes-Côte d'Azur, France", 43.2965, 5.3698], ['Bordeaux', 'Nouvelle-Aquitaine, France', 44.8378, -.5792],
+    ['Lille', 'Hauts-de-France, France', 50.6292, 3.0573], ['Nantes', 'Pays de la Loire, France', 47.2184, -1.5536],
+    ['Toulouse', 'Occitanie, France', 43.6047, 1.4442], ['Strasbourg', 'Grand Est, France', 48.5734, 7.7521],
+    ['Bruxelles', 'Bruxelles-Capitale, Belgique', 50.8503, 4.3517], ['Genève', 'Genève, Suisse', 46.2044, 6.1432],
+    ['Montréal', 'Québec, Canada', 45.5017, -73.5673], ['Dakar', 'Dakar, Sénégal', 14.6937, -17.4441],
+    ['Tromsø', 'Troms, Norvège', 69.6492, 18.9553], ['Tokyo', 'Tokyo, Japon', 35.6895, 139.6917],
+  ],
+  norm: s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(),
+  geocode(q) {
+    const n = this.norm(q);
+    return this.cities.filter(c => this.norm(c[0]).startsWith(n)).map(([name, region, lat, lon]) => ({ name, region, lat, lon }));
+  },
+  rng(seed) {
+    let s = (Math.abs(Math.floor(seed)) % 2147483646) + 1;
+    return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+  },
+  frame(p) {
+    const off = Math.round(p.lon / 15) * 3600;
+    const nowL = Date.now() + off * 1000, day0 = Math.floor(nowL / DAY) * DAY;
+    const y0 = Date.UTC(new Date(day0).getUTCFullYear(), 0, 1), doy = (day0 - y0) / DAY;
+    const season = -Math.cos(2 * Math.PI * (doy - 15) / 365) * (p.lat >= 0 ? 1 : -1);
+    const alat = Math.abs(p.lat);
+    const base = 13 + 9 * season * Math.min(1, alat / 40) - Math.max(0, alat - 42) * .5 + Math.max(0, 28 - alat) * .45;
+    return { off, nowL, day0, season, alat, base };
+  },
+  forecast(p) {
+    const { off, nowL, day0, season, alat, base } = this.frame(p);
+    const r = this.rng(p.lat * 1000 * 31 + p.lon * 1000 + Math.floor(nowL / DAY));
+    const ph = [r() * 6.28, r() * 6.28, r() * 6.28, r() * 6.28];
+    const dayLen = clamp(12 + 3.6 * season * Math.min(1.8, alat / 40), 3, 21);
+    const iso = t => new Date(t).toISOString().slice(0, 16);
+    const N = 192, Hr = { time: [], temperature_2m: [], apparent_temperature: [], relative_humidity_2m: [], dew_point_2m: [], precipitation_probability: [], precipitation: [], weather_code: [], cloud_cover: [], visibility: [], wind_speed_10m: [], wind_direction_10m: [], wind_gusts_10m: [], uv_index: [], is_day: [], pressure_msl: [] };
+    for (let k = 0; k < N; k++) {
+      const t = day0 + k * HOUR, hr = k % 24;
+      const w = .46 + .3 * Math.sin(2 * Math.PI * k / 70 + ph[0]) + .18 * Math.sin(2 * Math.PI * k / 23 + ph[1]) + .08 * Math.sin(2 * Math.PI * k / 7 + ph[2]);
+      const cloud = Math.round(clamp((w - .15) * 140, 0, 100));
+      const precip = w > .8 ? Math.round((w - .8) * 90) / 10 : 0;
+      const temp = base + 4.6 * Math.sin(2 * Math.PI * (hr - 9) / 24) - cloud * .025 + 2.4 * Math.sin(2 * Math.PI * k / 90 + ph[3]);
+      const wind = 6 + 16 * (.5 + .5 * Math.sin(2 * Math.PI * k / 40 + ph[2])) + precip * 3;
+      const rh = Math.round(clamp(58 + w * 32 - (temp - base) * 2.2, 22, 100));
+      const a = 17.27, b = 237.7, gm = a * temp / (b + temp) + Math.log(rh / 100);
+      const sr = 12.5 - dayLen / 2, ss = 12.5 + dayLen / 2, isDay = hr >= sr && hr < ss ? 1 : 0;
+      const pop = Math.round(clamp((w - .55) * 320, 0, 100));
+      let code = cloud < 15 ? 0 : cloud < 40 ? 1 : cloud < 75 ? 2 : 3;
+      if (precip > 0) code = temp < 1 ? (precip > 1.5 ? 73 : 71) : precip > 3.5 && temp > 17 ? 95 : precip > 2 ? 81 : precip > .6 ? 61 : 51;
+      Hr.time.push(iso(t)); Hr.temperature_2m.push(+temp.toFixed(1)); Hr.apparent_temperature.push(+(temp - wind * .09 + (rh > 70 && temp > 24 ? 2 : 0)).toFixed(1));
+      Hr.relative_humidity_2m.push(rh); Hr.dew_point_2m.push(+(b * gm / (a - gm)).toFixed(1)); Hr.precipitation_probability.push(pop);
+      Hr.precipitation.push(precip); Hr.weather_code.push(code); Hr.cloud_cover.push(cloud); Hr.visibility.push(precip > 0 ? 7000 : 24000);
+      Hr.wind_speed_10m.push(+wind.toFixed(1)); Hr.wind_direction_10m.push(Math.round((250 + 70 * Math.sin(2 * Math.PI * k / 60 + ph[0]) + 360) % 360));
+      Hr.wind_gusts_10m.push(+(wind * 1.65).toFixed(1));
+      Hr.uv_index.push(isDay ? +Math.max(0, (4.5 + 4 * season) * Math.sin(Math.PI * (hr + .5 - sr) / dayLen) * (1 - cloud / 140)).toFixed(2) : 0);
+      Hr.is_day.push(isDay); Hr.pressure_msl.push(+(1014 + 8 * Math.sin(2 * Math.PI * k / 96 + ph[1]) - precip * 2).toFixed(1));
+    }
+    const D = { time: [], weather_code: [], temperature_2m_max: [], temperature_2m_min: [], sunrise: [], sunset: [], daylight_duration: [], uv_index_max: [], precipitation_sum: [], precipitation_probability_max: [], wind_speed_10m_max: [], wind_gusts_10m_max: [] };
+    for (let d = 0; d < 8; d++) {
+      const sl = (arr) => arr.slice(d * 24, d * 24 + 24);
+      const temps = sl(Hr.temperature_2m), codes = sl(Hr.weather_code);
+      const dl = dayLen + d * .02 * season;
+      D.time.push(iso(day0 + d * DAY).slice(0, 10));
+      D.weather_code.push(Math.max(...codes.filter((c, i) => i >= 7 && i <= 20)));
+      D.temperature_2m_max.push(Math.max(...temps)); D.temperature_2m_min.push(Math.min(...temps));
+      D.sunrise.push(iso(day0 + d * DAY + (12.5 - dl / 2) * HOUR)); D.sunset.push(iso(day0 + d * DAY + (12.5 + dl / 2) * HOUR));
+      D.daylight_duration.push(dl * 3600); D.uv_index_max.push(Math.max(...sl(Hr.uv_index)));
+      D.precipitation_sum.push(+sl(Hr.precipitation).reduce((s, v) => s + v, 0).toFixed(1));
+      D.precipitation_probability_max.push(Math.max(...sl(Hr.precipitation_probability)));
+      D.wind_speed_10m_max.push(Math.max(...sl(Hr.wind_speed_10m))); D.wind_gusts_10m_max.push(Math.max(...sl(Hr.wind_gusts_10m)));
+    }
+    const ci = Math.min(N - 1, Math.floor((nowL - day0) / HOUR));
+    const pick = k => Hr[k][ci];
+    return {
+      latitude: p.lat, longitude: p.lon, utc_offset_seconds: off, timezone: 'Démo',
+      current: {
+        time: iso(nowL), temperature_2m: pick('temperature_2m'), apparent_temperature: pick('apparent_temperature'), relative_humidity_2m: pick('relative_humidity_2m'),
+        is_day: pick('is_day'), precipitation: pick('precipitation'), weather_code: pick('weather_code'), cloud_cover: pick('cloud_cover'), pressure_msl: pick('pressure_msl'),
+        wind_speed_10m: pick('wind_speed_10m'), wind_direction_10m: pick('wind_direction_10m'), wind_gusts_10m: pick('wind_gusts_10m'),
+      },
+      hourly: Hr, daily: D,
+    };
+  },
+  air(p) {
+    const { day0 } = this.frame(p);
+    const r = this.rng(p.lat * 77 + p.lon * 13);
+    const H = { time: [], european_aqi: [], pm2_5: [], pm10: [], ozone: [], nitrogen_dioxide: [] };
+    for (let k = 0; k < 72; k++) {
+      const v = 22 + 14 * Math.sin(2 * Math.PI * k / 24 + r() * .3) + r() * 6;
+      H.time.push(new Date(day0 + k * HOUR).toISOString().slice(0, 16));
+      H.european_aqi.push(Math.round(v)); H.pm2_5.push(+(v * .35).toFixed(1)); H.pm10.push(+(v * .6).toFixed(1));
+      H.ozone.push(+(40 + v).toFixed(1)); H.nitrogen_dioxide.push(+(v * .5).toFixed(1));
+    }
+    return { hourly: H };
+  },
+  archive(p, yA, yB) {
+    const { alat } = this.frame(p);
+    const r = this.rng(p.lat * 991 + p.lon * 7);
+    const time = [], tmax = [];
+    for (let t = Date.UTC(yA, 0, 1); t <= Date.UTC(yB, 11, 31); t += DAY) {
+      const d = new Date(t), y = d.getUTCFullYear(), doy = (t - Date.UTC(y, 0, 1)) / DAY;
+      const season = -Math.cos(2 * Math.PI * (doy - 15) / 365) * (p.lat >= 0 ? 1 : -1);
+      const base = 13 + 9 * season * Math.min(1, alat / 40) - Math.max(0, alat - 42) * .5 + Math.max(0, 28 - alat) * .45;
+      time.push(d.toISOString().slice(0, 10));
+      tmax.push(+(base + 4.6 + (y - yA) * .035 + (r() + r() + r() - 1.5) * 4).toFixed(1));
+    }
+    return { daily: { time, temperature_2m_max: tmax } };
+  },
+};
+
+/* ==========================================================================
+   15. Démarrage
+   ========================================================================== */
+paintUnits();
+(function init() {
+  const sp = new URLSearchParams(location.search);
+  const lat = parseFloat(sp.get('lat')), lon = parseFloat(sp.get('lon'));
+  let place = null;
+  if (isFinite(lat) && isFinite(lon)) place = { name: sp.get('name') || 'Lieu partagé', region: sp.get('region') || '', lat, lon };
+  else place = store.get('last', null);
+  if (!place || !isFinite(place.lat)) place = { name: 'Paris', region: 'Île-de-France, France', lat: 48.8534, lon: 2.3488 };
+  loadPlace(place);
+})();
+
+})();

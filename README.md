@@ -2,6 +2,8 @@
 
 Application météo en temps réel construite sur les API gratuites d'[Open-Meteo](https://open-meteo.com/). Trois fichiers statiques (`index.html`, `style.css`, `app.js`), sans framework ni dépendance, sans étape de build ni clé d'API.
 
+En ligne : [meteo-aura.vercel.app](https://meteo-aura.vercel.app/)
+
 ## L'idée
 
 La plupart des applications météo empilent des cartes de chiffres. Aura part d'un autre principe : **le ciel est la donnée**.

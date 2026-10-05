@@ -9,13 +9,20 @@
   inherits: true;
   initial-value: #4fc1b0;
 }
+/* Clarté du ciel derrière l'interface (0 = nuit, 1 = jour couvert et lumineux), calculée par app.js :
+   elle renforce le voile du héros et les surfaces vitrées pour garder le texte lisible. */
+@property --lux {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
 
 :root {
   --ink: #0f1c2e;
-  --panel: rgba(12, 22, 38, .8);
+  --panel: rgba(12, 22, 38, .86);
   --cloud: #f1f4f8;
   --mist: #aab7c9;
-  --faint: #8495ab;
+  --faint: #99a8bc;
   --hair: rgba(241, 244, 248, .12);
   --glass: rgba(8, 16, 30, .36);
   --glass-line: rgba(255, 255, 255, .17);
@@ -26,7 +33,7 @@
   --body: "Figtree", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --ease: cubic-bezier(.22, .8, .24, 1);
   color-scheme: dark;
-  transition: --accent 1.2s var(--ease);
+  transition: --accent 1.2s var(--ease), --lux 1.2s var(--ease);
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -46,9 +53,14 @@ button { font: inherit; color: inherit; }
 svg { display: block; }
 .sr-only {
   position: absolute !important; width: 1px; height: 1px; overflow: hidden;
+  margin: -1px; padding: 0; border: 0;
   clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
 }
-:focus-visible { outline: 2px solid var(--cloud); outline-offset: 3px; border-radius: 8px; }
+/* Anneau clair cerné de sombre : reste visible sur un nuage blanc comme sur un ciel de nuit */
+:focus-visible {
+  outline: 2px solid var(--cloud); outline-offset: 3px; border-radius: 8px;
+  box-shadow: 0 0 0 7px rgba(4, 10, 22, .55);
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -96,7 +108,7 @@ svg { display: block; }
 
 .topbar { flex: none; display: flex; align-items: center; gap: 10px; position: relative; z-index: 5; }
 .brand {
-  display: inline-flex; align-items: center; gap: 9px; margin-right: 6px;
+  display: inline-flex; align-items: center; gap: 9px; margin-right: 6px; min-height: 44px;
   color: var(--cloud); text-decoration: none;
   font-family: var(--display); font-size: 24px; font-weight: 500; letter-spacing: -.01em;
   font-variation-settings: "opsz" 36, "SOFT" 60;
@@ -107,7 +119,7 @@ svg { display: block; }
 .search input {
   width: 100%; height: 44px; padding: 0 40px;
   border-radius: 12px; border: 1px solid var(--glass-line);
-  background: var(--glass);
+  background: rgb(8 16 30 / calc(.36 + .3 * var(--lux)));
   -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
   color: var(--cloud); font: inherit; font-size: 16px;
   transition: background .2s, border-color .2s;
@@ -117,7 +129,7 @@ svg { display: block; }
 .search input:focus { outline: none; background: rgba(8, 16, 30, .62); border-color: rgba(255, 255, 255, .42); }
 .search input:focus-visible { outline: 2px solid var(--cloud); outline-offset: 2px; }
 .search .s-ic {
-  position: absolute; left: 13px; top: 50%; transform: translateY(-50%);
+  position: absolute; z-index: 1; left: 13px; top: 50%; transform: translateY(-50%);
   width: 18px; height: 18px; opacity: .8; pointer-events: none;
 }
 .search kbd {
@@ -153,7 +165,8 @@ svg { display: block; }
   flex: none; height: 44px; min-width: 44px; padding: 0 12px;
   display: inline-grid; place-items: center;
   border-radius: 12px; border: 1px solid var(--glass-line);
-  background: var(--glass); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  background: rgb(8 16 30 / calc(.36 + .3 * var(--lux)));
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
   cursor: pointer; transition: background .2s;
 }
 .icon-btn:hover { background: rgba(8, 16, 30, .55); }
@@ -167,7 +180,7 @@ svg { display: block; }
 .chip {
   flex: none; display: inline-flex; align-items: center; gap: 8px;
   height: 34px; padding: 0 12px; border-radius: 999px;
-  border: 1px solid var(--glass-line); background: rgba(8, 16, 30, .3);
+  border: 1px solid var(--glass-line); background: rgb(8 16 30 / calc(.3 + .3 * var(--lux)));
   -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
   font-size: 14px; white-space: nowrap; cursor: pointer; transition: background .2s;
 }
@@ -184,12 +197,19 @@ svg { display: block; }
   flex: 1 0 auto; min-height: 0;
   display: flex; flex-direction: column; justify-content: center;
   padding: 8px 0;
-  text-shadow: 0 1px 2px rgba(4, 10, 22, .3), 0 0 24px rgba(4, 10, 22, .42);
+  text-shadow: 0 1px 2px rgb(4 10 22 / calc(.3 + .3 * var(--lux))), 0 0 24px rgb(4 10 22 / calc(.42 + .3 * var(--lux)));
 }
+/* Voile derrière le bloc de texte (aligné à gauche) : discret la nuit, dense quand un ciel clair
+   ou couvert l'éclaire. Il s'efface vers la droite (--veil-a, --veil-b) et en haut comme en bas. */
 .hero::before {
   content: ""; position: absolute; z-index: -1; pointer-events: none;
-  inset: -6% 0 -6% -40%;
-  background: radial-gradient(closest-side at 35% 52%, rgba(4, 10, 22, .44), rgba(4, 10, 22, .18) 70%, transparent);
+  inset: -10% var(--veil-r, 0px) -10% -40%;
+  background: linear-gradient(90deg,
+    rgb(4 10 22 / calc(.38 + .34 * var(--lux))),
+    rgb(4 10 22 / calc(.32 + .38 * var(--lux))) var(--veil-a, 72%),
+    rgb(4 10 22 / calc(.1 + .16 * var(--lux))) var(--veil-b, 90%), transparent);
+  -webkit-mask-image: linear-gradient(transparent, #000 22%, #000 80%, transparent);
+  mask-image: linear-gradient(transparent, #000 22%, #000 80%, transparent);
 }
 .place { display: flex; align-items: center; gap: 8px; }
 .place h1 {
@@ -199,7 +219,7 @@ svg { display: block; }
   font-variation-settings: "opsz" 72, "SOFT" 40;
 }
 .fav {
-  flex: none; width: 40px; height: 40px; display: grid; place-items: center;
+  flex: none; width: 44px; height: 44px; display: grid; place-items: center;
   border: 0; border-radius: 50%; background: transparent; cursor: pointer;
   color: rgba(241, 244, 248, .75); transition: color .2s, transform .3s var(--ease);
 }
@@ -257,6 +277,8 @@ svg { display: block; }
 }
 .back-now svg { width: 16px; height: 16px; }
 .back-now[hidden] { display: none; }
+/* Sur grand écran le panneau reste visible à côté du héros : ce raccourci ne sert que sur mobile */
+@media (min-width: 961px) { .back-acts { display: none; } }
 
 body.is-loading .temp, body.is-loading .cond, body.is-loading .facts, body.is-loading .insight {
   opacity: .35; transition: opacity .3s;
@@ -268,7 +290,7 @@ body.is-loading .temp, body.is-loading .cond, body.is-loading .facts, body.is-lo
 .timeline {
   flex: none;
   border-radius: 20px; padding: 14px 16px 10px;
-  background: rgba(8, 16, 30, .42);
+  background: rgb(8 16 30 / calc(.42 + .3 * var(--lux)));
   -webkit-backdrop-filter: blur(18px) saturate(1.2); backdrop-filter: blur(18px) saturate(1.2);
   border: 1px solid var(--glass-line);
 }
@@ -284,7 +306,8 @@ body.is-loading .temp, body.is-loading .cond, body.is-loading .facts, body.is-lo
   touch-action: pan-y; cursor: ew-resize; user-select: none; -webkit-user-select: none;
   border-radius: 10px;
 }
-.tl-chart svg { overflow: visible; }
+/* Largeur fluide : le SVG ne doit jamais imposer sa largeur à la colonne (rotation, redimensionnement) */
+.tl-chart svg { overflow: visible; width: 100%; height: auto; }
 .tl-chart:focus-visible { outline-offset: 2px; }
 .tl-night { fill: rgba(3, 8, 22, .26); }
 .tl-mid { stroke: rgba(241, 244, 248, .22); stroke-dasharray: 2 3; }
@@ -298,7 +321,7 @@ body.is-loading .temp, body.is-loading .cond, body.is-loading .facts, body.is-lo
 .tl-cur line { stroke: var(--cloud); stroke-width: 1.5; }
 .tl-cur circle { fill: var(--cloud); stroke: rgba(8, 16, 30, .6); stroke-width: 3; transition: transform .3s var(--ease); }
 .tl-chart.dragging .tl-cur, .tl-chart.dragging .tl-cur circle { transition: none; }
-.tl-hint { margin: 2px 0 0; font-size: 13px; color: var(--faint); }
+.tl-hint { margin: 2px 0 0; max-width: 72ch; font-size: 13px; color: var(--mist); }
 
 /* --------------------------------------------------------------------------
    Panneau (colonne de droite)
@@ -334,6 +357,8 @@ body.ready .panel { opacity: 1; transform: none; }
   background: transparent; text-align: left; cursor: pointer; transition: background .2s;
 }
 .act:hover { background: rgba(255, 255, 255, .05); }
+/* Activité dont le ciel est affiché : reste marquée tant que la frise pointe sur son créneau */
+.act[aria-pressed="true"] { background: rgba(255, 255, 255, .08); box-shadow: inset 0 0 0 1px var(--glass-line); }
 .act-ic {
   grid-row: 1 / 3; width: 40px; height: 40px; border-radius: 12px;
   display: grid; place-items: center; background: rgba(255, 255, 255, .07);
@@ -348,12 +373,14 @@ body.ready .panel { opacity: 1; transform: none; }
 }
 .act-score span { font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
 .act.is-none .act-score b { color: var(--mist); }
+/* La bande horaire ne s'affiche que pour l'activité ouverte : une seule lecture à la fois */
 .act-strip {
   grid-column: 2 / 4; grid-row: 3; margin-top: 10px;
-  display: grid; grid-template-columns: repeat(48, 1fr); gap: 2px; height: 10px;
+  display: grid; grid-template-columns: repeat(48, 1fr); align-items: end; gap: 2px; height: 12px;
 }
-.act-strip i { border-radius: 2px; background: rgba(241, 244, 248, var(--s, .1)); }
-.act-strip i.w { background: var(--accent); }
+.act:not(.is-open) .act-strip { display: none; }
+.act-strip i { height: 60%; border-radius: 2px; background: rgba(241, 244, 248, var(--s, .1)); }
+.act-strip i.w { height: 100%; background: var(--cloud); }
 .act-strip i.mid { margin-left: 3px; }
 .act-why { grid-column: 2 / 4; grid-row: 4; margin-top: 7px; font-size: 13px; color: var(--faint); }
 
@@ -362,13 +389,33 @@ body.ready .panel { opacity: 1; transform: none; }
 .day + .day { border-top: 1px solid var(--hair); }
 .day-btn {
   display: grid;
-  grid-template-columns: minmax(6.2rem, 1.1fr) 28px 3.8rem 2.6rem minmax(56px, 2fr) 2.6rem;
+  grid-template-columns: minmax(6.2rem, 1.1fr) 28px 3.8rem 2.6rem minmax(56px, 2fr) 2.6rem 12px;
   align-items: center; gap: 12px;
   width: 100%; padding: 12px 0; border: 0; background: none; text-align: left; cursor: pointer;
   font-variant-numeric: tabular-nums;
 }
-.day-btn:hover .d-name { text-decoration: underline; text-underline-offset: 4px; text-decoration-color: var(--hair); }
-.d-name { font-weight: 500; }
+.day-btn:hover { background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .04) 12%, rgba(255, 255, 255, .04) 88%, transparent); }
+.d-name { min-width: 0; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.d-chev { width: 12px; height: 12px; fill: none; stroke: var(--mist); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; transition: transform .3s var(--ease); }
+.day.open .d-chev { transform: rotate(180deg); }
+/* La liste s'adapte à sa propre largeur (panneau étroit sur bureau comme sur mobile) */
+.week { container-type: inline-size; }
+@container (max-width: 430px) {
+  .day-btn { grid-template-columns: 5.4rem 24px 3.4rem 2.2rem minmax(32px, 1fr) 2.2rem 12px; gap: 8px; }
+  .d-ic svg { width: 24px; height: 24px; }
+}
+/* Très étroit : la probabilité de pluie passe sous le nom du jour */
+@container (max-width: 340px) {
+  .day-btn { grid-template-columns: minmax(0, 1fr) 24px 2.2rem minmax(24px, 2.5rem) 2.2rem 12px; row-gap: 0; }
+  .d-name { grid-column: 1; grid-row: 1; }
+  .d-pop { grid-column: 1; grid-row: 2; }
+  .d-pop:empty { display: none; }
+  .d-ic { grid-column: 2; grid-row: 1 / 3; }
+  .d-min { grid-column: 3; grid-row: 1 / 3; }
+  .rb { grid-column: 4; grid-row: 1 / 3; }
+  .d-max { grid-column: 5; grid-row: 1 / 3; }
+  .d-chev { grid-column: 6; grid-row: 1 / 3; }
+}
 .d-ic svg { width: 28px; height: 28px; }
 .d-pop { display: inline-flex; align-items: center; gap: 3px; font-size: 13px; color: var(--rain); white-space: nowrap; }
 .d-pop svg { width: 11px; height: 11px; }
@@ -401,6 +448,15 @@ body.ready .panel { opacity: 1; transform: none; }
   display: flex; flex-direction: column; gap: 6px; min-width: 0;
   padding: 18px 18px 16px; min-height: 172px;
   box-shadow: 1px 0 0 var(--hair), 0 1px 0 var(--hair);
+  container-type: inline-size;
+}
+/* Instrument étroit (panneau serré sur bureau, ou mobile) : le cadran passe au-dessus de la valeur */
+@container (max-width: 224px) {
+  .inst-row { flex-direction: column-reverse; align-items: flex-start; gap: 8px; }
+  .val { font-size: 32px; }
+  .gauge { width: 74px; }
+  .compass { width: 60px; height: 60px; }
+  .hum, .moon-svg { width: 52px; height: 52px; }
 }
 .inst.wide { grid-column: span 2; }
 .inst h3 { margin: 0; font-size: 14px; font-weight: 500; color: var(--mist); }
@@ -440,6 +496,15 @@ body.ready .panel { opacity: 1; transform: none; }
   position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
   background: var(--cloud); box-shadow: 0 0 0 3px var(--ink); transition: left .8s var(--ease);
 }
+/* Visibilité : du brouillard (gauche) à l'horizon dégagé (droite), échelle logarithmique */
+.vis-scale {
+  position: relative; height: 6px; margin: 14px 0 6px; border-radius: 3px;
+  background: linear-gradient(90deg, rgba(170, 183, 201, .3), rgba(124, 196, 255, .85));
+}
+.vis-scale b {
+  position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
+  background: var(--cloud); box-shadow: 0 0 0 3px var(--ink); transition: left .8s var(--ease);
+}
 .aq-pol { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 0; }
 .aq-pol dt { font-size: 12.5px; color: var(--faint); }
 .aq-pol dd { margin: 0; font-variant-numeric: tabular-nums; font-size: 15px; }
@@ -452,11 +517,13 @@ body.ready .panel { opacity: 1; transform: none; }
   font-variation-settings: "opsz" 36, "SOFT" 40;
 }
 .dist { margin: 14px 0 6px; height: 112px; }
+.dist svg { width: 100%; height: auto; }
 .dist text { font: 600 12px var(--body); fill: var(--cloud); }
 .dist .n-lab { fill: var(--mist); font-weight: 500; }
 .clim-h { margin: 26px 0 10px; font-size: 15px; font-weight: 600; }
 .stripes { display: flex; height: 84px; border-radius: 10px; overflow: hidden; cursor: crosshair; touch-action: pan-y; }
 .stripes i { flex: 1; transition: filter .15s; }
+.stripes:focus-visible { outline-offset: 4px; }
 .stripes i.on { filter: brightness(1.25) saturate(1.1); box-shadow: inset 0 0 0 2px rgba(255, 255, 255, .85); }
 .stripes-axis { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 12.5px; color: var(--faint); margin-top: 6px; }
 .stripes-axis .lg { display: inline-flex; align-items: center; gap: 5px; text-align: center; }
@@ -504,10 +571,26 @@ body.ready .panel { opacity: 1; transform: none; }
 /* --------------------------------------------------------------------------
    Responsive
    -------------------------------------------------------------------------- */
+/* Écran large mais peu haut (portable 1280 × 720) : le héros se resserre pour que la frise reste entière */
+@media (min-width: 961px) and (max-height: 860px) {
+  .stage { gap: 12px; padding-top: max(16px, env(safe-area-inset-top)); padding-bottom: 16px; }
+  .hero { padding: 0; }
+  .when-row { margin-top: 6px; }
+  .temp { margin: 2px 0 2px -.05em; font-size: clamp(96px, min(15vw, 19vh), 200px); }
+  .facts { margin-top: 10px; }
+  .insight { margin-top: 10px; font-size: 16px; }
+  .timeline { padding: 12px 16px 8px; }
+}
+/* Écrans tactiles : cibles d'au moins 44 px, même quand la forme visible reste fine */
+@media (pointer: coarse) {
+  .chip, .back-now { height: 44px; }
+  .demo-banner button, .toast button { min-height: 44px; }
+}
 @media (max-width: 960px) {
-  .app { grid-template-columns: 1fr; }
+  .app { grid-template-columns: minmax(0, 1fr); }
   .stage { position: relative; height: auto; min-height: 100svh; overflow: visible; }
-  .hero { padding: 28px 0 16px; }
+  /* Mobile : le texte occupe toute la largeur, le voile va jusqu'au bord de l'écran et s'y efface */
+  .hero { padding: 28px 0 16px; --veil-a: 70%; --veil-b: 100%; --veil-r: -24px; }
   .panel {
     --panel: rgba(12, 22, 38, .9);
     border-left: 0; border-top: 1px solid var(--hair);
@@ -517,19 +600,12 @@ body.ready .panel { opacity: 1; transform: none; }
 }
 @media (max-width: 560px) {
   .brand span { display: none; }
-  .brand { margin-right: 0; }
+  .brand { margin-right: 0; min-width: 44px; justify-content: center; }
   .topbar { gap: 8px; }
   .icon-btn { padding: 0 10px; }
-  .day-btn { grid-template-columns: 5.4rem 24px 3.4rem 2.2rem minmax(32px, 1fr) 2.2rem; gap: 8px; }
-  .d-ic svg { width: 24px; height: 24px; }
   .search kbd { display: none; }
   .search input { padding-right: 12px; }
   .inst { padding: 16px 14px 14px; }
-  .val { font-size: 32px; }
-  .inst-row { flex-direction: column-reverse; align-items: flex-start; gap: 8px; }
-  .gauge { width: 74px; }
-  .compass { width: 60px; height: 60px; }
-  .hum, .moon-svg { width: 52px; height: 52px; }
   .dm { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .aq-pol { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

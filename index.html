@@ -39,8 +39,8 @@
 <main class="app">
   <div class="stage" id="stage">
     <div class="demo-banner" id="demo" hidden>
-      <p><strong>Mode démonstration.</strong> L'API Open-Meteo n'est pas joignable depuis cet environnement : les données affichées sont simulées.</p>
-      <button type="button" id="demo-retry">Réessayer avec l'API</button>
+      <p><strong>Mode démonstration.</strong> Le service météo Open-Meteo ne répond pas : les données affichées sont simulées, pas réelles.</p>
+      <button type="button" id="demo-retry">Recharger les vraies données</button>
     </div>
 
     <header class="topbar">
@@ -77,8 +77,12 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4.5h4.5"/></svg>
           Revenir à maintenant
         </button>
+        <button class="back-now back-acts" id="back-acts" type="button" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="m6 13 6 6 6-6"/></svg>
+          Revenir aux créneaux
+        </button>
       </div>
-      <p class="temp"><span id="temp">–</span><span class="deg" aria-hidden="true">°</span></p>
+      <p class="temp"><span id="temp">–</span><span class="deg">°</span></p>
       <p class="cond" id="cond"></p>
       <div class="facts">
         <span id="feels"></span>
@@ -105,7 +109,7 @@
   <div class="panel" id="panel">
     <section class="section" aria-labelledby="acts-title">
       <h2 id="acts-title">Vos meilleurs créneaux</h2>
-      <p class="lede">Les heures les plus favorables d'ici 48 h, calculées à partir des prévisions horaires. Touchez une activité pour voir le ciel à ce moment-là.</p>
+      <p class="lede" id="acts-lede">Les heures les plus favorables d'ici 48 h, calculées à partir des prévisions horaires. Touchez une activité pour voir le ciel à ce moment-là.</p>
       <ul class="acts" id="acts"></ul>
     </section>
 
@@ -185,6 +189,7 @@
           <h3 id="i-vis">Visibilité</h3>
           <p class="val"><span id="vis-v">–</span><small id="vis-u">km</small></p>
           <p class="lab" id="vis-l"></p>
+          <div class="vis-scale" aria-hidden="true"><b id="vis-dot"></b></div>
           <p class="cap" id="vis-c"></p>
         </article>
 

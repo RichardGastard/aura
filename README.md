@@ -41,7 +41,7 @@ Les archives sont mises en cache dans le navigateur (une requête par lieu et pa
 
 ## Accessibilité
 
-Navigation complète au clavier (la frise est un `slider` ARIA piloté aux flèches), recherche en `combobox` ARIA, annonces vocales au changement de lieu, focus visible, respect de `prefers-reduced-motion` (ciel figé, pas d'éclairs), mise en page responsive jusqu'à 320 px.
+Navigation complète au clavier (la frise et les bandes climatiques sont des `slider` ARIA pilotés aux flèches), recherche en `combobox` ARIA, annonces vocales au changement de lieu, focus visible, respect de `prefers-reduced-motion` (ciel figé, pas d'éclairs), mise en page responsive jusqu'à 320 px.
 
 ## Lancer le projet
 

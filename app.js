@@ -191,6 +191,7 @@ const state = {
   aq: null, aqFailed: false, climate: null,
   demo: false, favs: store.get('favs', []), favTemps: new Map(),
   loadId: 0, placeChanged: true,
+  act: null, openAct: null, // activité dont le ciel est affiché, activité dépliée dans la liste
 };
 const nowLocal = () => Date.now() + state.model.offset;
 const keyOf = p => `${(+p.lat).toFixed(2)},${(+p.lon).toFixed(2)}`;
@@ -341,9 +342,13 @@ const Sky = (() => {
   const drops = Array.from({ length: 440 }, () => ({ x: rnd() * 1.2 - .1, y: rnd(), l: 12 + rnd() * 14, v: .85 + rnd() * .5 }));
   const flakes = Array.from({ length: 260 }, () => ({ x: rnd(), y: rnd(), r: .8 + rnd() * 2.2, v: .3 + rnd() * .7, ph: rnd() * 6.28 }));
 
+  // Le nuage est dessiné dans une zone de 420 × 200, avec une marge (SPR) pour que ses dégradés
+  // s'éteignent avant le bord du sprite au lieu d'être coupés net.
+  const SPR = { w: 520, h: 280, x: 50, y: 40 };
   function sprite(seed, col) {
-    const c = document.createElement('canvas'); c.width = 420; c.height = 200;
+    const c = document.createElement('canvas'); c.width = SPR.w; c.height = SPR.h;
     const g = c.getContext('2d');
+    g.translate(SPR.x, SPR.y);
     let s = seed * 9301 + 49297;
     const r = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
     for (let k = 0; k < 10; k++) {
@@ -366,8 +371,9 @@ const Sky = (() => {
     const wide = innerWidth > 960;
     const stage = $('#stage');
     const sw = wide && stage ? stage.getBoundingClientRect().width * dpr : W;
-    // Sur mobile, le soleil et la lune passent en haut à droite, hors de la colonne de texte.
-    region = wide ? { x0: 0, x1: sw, y0: H * .1, y1: H * .62, r: 1 } : { x0: W * .4, x1: W * .97, y0: H * .1, y1: H * .3, r: .8 };
+    // Le soleil et la lune parcourent la partie droite de la scène, hors du bloc de texte aligné à gauche
+    // (sur mobile : en haut à droite, au-dessus du héros).
+    region = wide ? { x0: sw * .56, x1: sw * .98, y0: H * .16, y1: H * .52, r: 1 } : { x0: W * .4, x1: W * .97, y0: H * .1, y1: H * .3, r: .8 };
     if (!running) draw(0, false);
   }
 
@@ -485,13 +491,14 @@ const Sky = (() => {
         if (cl.x < 0) { cl.x += 1; cl.y = .02 + Math.random() * .5; }
       }
       if (a <= .01) continue;
-      const x = cl.x * (W + sw) - sw, y = cl.y * H * .9;
+      const k = sw / 420, x = cl.x * (W + sw) - sw - SPR.x * k, y = cl.y * H * .9 - SPR.y * k;
+      const dw = SPR.w * k, dh = SPR.h * k;
       const alpha = a * (.5 + .5 * C.cloud);
       if (dayness > .01) {
-        ctx.globalAlpha = alpha * dayness * (1 - grey); ctx.drawImage(spritesLight[cl.sp], x, y, sw, sh);
-        ctx.globalAlpha = alpha * dayness * grey; ctx.drawImage(spritesGrey[cl.sp], x, y, sw, sh);
+        ctx.globalAlpha = alpha * dayness * (1 - grey); ctx.drawImage(spritesLight[cl.sp], x, y, dw, dh);
+        ctx.globalAlpha = alpha * dayness * grey; ctx.drawImage(spritesGrey[cl.sp], x, y, dw, dh);
       }
-      ctx.globalAlpha = alpha * (1 - dayness) * .95; if (dayness < .99) ctx.drawImage(spritesDark[cl.sp], x, y, sw, sh);
+      ctx.globalAlpha = alpha * (1 - dayness) * .95; if (dayness < .99) ctx.drawImage(spritesDark[cl.sp], x, y, dw, dh);
     }
     ctx.globalAlpha = 1;
 
@@ -605,7 +612,17 @@ function skyParams(s) {
     south: state.place.lat < 0,
   };
 }
-const updateSky = () => Sky.set(skyParams(snap()));
+/* Clarté du fond derrière le texte : nulle la nuit, maximale par jour couvert ou brumeux (nuages blancs).
+   Elle pilote --lux, qui densifie le voile du héros et les surfaces vitrées (voir style.css). */
+function skyLux(p) {
+  const dayness = clamp((p.h + .25) / .5, 0, 1);
+  return dayness * clamp(.45 + .55 * p.cloud * (1 - .6 * p.rain) + .3 * p.fog, 0, 1);
+}
+function updateSky() {
+  const p = skyParams(snap());
+  Sky.set(p);
+  document.documentElement.style.setProperty('--lux', skyLux(p).toFixed(3));
+}
 
 /* ==========================================================================
    5. Héros
@@ -647,11 +664,13 @@ function renderHero() {
   $('#tr-fill').style.background = `linear-gradient(90deg, ${tempCSS(d.min)}, ${tempCSS((d.min + d.max) / 2)}, ${tempCSS(d.max)})`;
   $('#tr-dot').style.left = `${clamp((s.temp - d.min) / Math.max(1, d.max - d.min), 0, 1) * 100}%`;
   const elsewhere = m.offset !== -new Date().getTimezoneOffset() * 6e4;
+  const act = activeAct();
   $('#when').textContent = s.live
     ? `${cap(F_LONG.format(nowL))}, ${fmtClock(nowL)}${elsewhere ? ' (heure locale)' : ''}`
-    : `Prévision pour ${whenLabel(s.t, nowL)}`;
+    : `${act ? `${act.name} : prévision` : 'Prévision'} pour ${whenLabel(s.t, nowL)}`;
   $('#hero').classList.toggle('is-forecast', !s.live);
   $('#back-now').hidden = s.live;
+  $('#back-acts').hidden = !act;
   document.documentElement.style.setProperty('--accent', tempCSS(s.temp));
 }
 
@@ -798,7 +817,7 @@ function setSel(idx) {
   state.sel = v;
   if (!selRaf) selRaf = requestAnimationFrame(() => {
     selRaf = 0;
-    renderHero(); updateSky(); updateCursor(); renderInstruments();
+    renderHero(); updateSky(); updateCursor(); renderInstruments(); syncActs();
   });
 }
 function pickFromPointer(e) {
@@ -825,7 +844,12 @@ TL.host.addEventListener('keydown', e => {
   else return;
   e.preventDefault();
 });
-$('#back-now').addEventListener('click', () => state.model && setSel(state.model.nowIdx));
+$('#back-now').addEventListener('click', () => {
+  if (!state.model) return;
+  setSel(state.model.nowIdx);
+  // Le bouton disparaît une fois revenu à maintenant : le focus passe à la frise, qui pilote le temps.
+  TL.host.focus({ preventScroll: true });
+});
 
 /* ==========================================================================
    7. Meilleurs créneaux : un score transparent par activité et par heure
@@ -926,18 +950,46 @@ function windowLabel(hs, a, b, nowL) {
   return sameDay ? `${start} – ${end}` : `${start} – ${dayLabel(e, nowL)} ${end}`;
 }
 
+/* « Idéal » est réservé aux créneaux presque parfaits, pour que l'étiquette départage vraiment. */
+const ratingOf = s => (s >= .9 ? 'Idéal' : s >= .8 ? 'Très bon' : s >= .6 ? 'Bon' : 'Correct');
+
+/* L'activité dont on regarde le créneau, tant que la frise pointe toujours dessus. */
+function activeAct() {
+  const a = state.act;
+  if (!a) return null;
+  if (state.sel !== a.sel) { state.act = null; return null; }
+  return ACTS.find(x => x.id === a.id) || null;
+}
+function syncActs() {
+  const act = activeAct();
+  document.querySelectorAll('#acts .act').forEach(b => b.setAttribute('aria-pressed', String(!!act && b.dataset.id === act.id)));
+  $('#back-acts').hidden = !act;
+}
+
 function renderActivities() {
   const m = state.model, i0 = m.nowIdx, nowL = nowLocal();
   const hs = m.hours.slice(i0, i0 + 48);
-  $('#acts').innerHTML = ACTS.map(act => {
+  // Une activité sans bon créneau passe en fin de liste ; les autres sont classées par note.
+  const list = ACTS.map(act => {
     const rows = hs.map(h => { const f = act.f(h); return { h, f, s: f.reduce((p, x) => p * x.v, 1) }; });
     const sc = rows.map(r => r.s);
     const win = bestWindow(sc, act.max);
     const peakI = win ? win.peak : sc.indexOf(Math.max(...sc));
     const peak = rows[peakI];
+    return { act, rows, win, peakI, peak, rank: win ? peak.s : peak.s - 1 };
+  }).sort((a, b) => b.rank - a.rank);
+  const openId = list.some(o => o.act.id === state.openAct) ? state.openAct : list[0].act.id;
+
+  const best = list[0];
+  const lead = best.win
+    ? `Le plus favorable d'ici 48 h : ${best.act.name.toLowerCase()}, ${windowLabel(hs, best.win.a, best.win.b, nowL).replace(/^\S/, c => c.toLowerCase())}.`
+    : "Aucun créneau vraiment favorable d'ici 48 h.";
+  $('#acts-lede').innerHTML = `<strong>${esc(lead)}</strong> Touchez une activité pour voir le ciel à ce moment-là.`;
+
+  $('#acts').innerHTML = list.map(({ act, rows, win, peakI, peak }) => {
     const weakest = peak.f.reduce((a, x) => (x.v < a.v ? x : a), peak.f[0]);
     const score = Math.round(peak.s * 100);
-    const rating = !win ? 'Déconseillé' : peak.s >= .8 ? 'Idéal' : peak.s >= .6 ? 'Bon' : 'Correct';
+    const rating = !win ? 'Déconseillé' : ratingOf(peak.s);
     const when = win ? windowLabel(hs, win.a, win.b, nowL) : "Pas de bon créneau d'ici 48 h";
     const why = win
       ? `${cap(act.why(peak.h))}.${weakest.v < .75 ? ` Point faible : ${weakest.why}.` : ''}`
@@ -947,21 +999,34 @@ function renderActivities() {
       const mid = i > 0 && hourOf(r.h.t) === 0;
       return `<i class="${inWin ? 'w' : ''}${mid ? ' mid' : ''}" style="--s:${(.08 + .72 * r.s).toFixed(2)}"></i>`;
     }).join('');
-    return `<li><button type="button" class="act${win ? '' : ' is-none'}" data-idx="${i0 + peakI}"
-        aria-label="${esc(`${act.name} : ${rating}. ${when}. Voir ce moment dans le ciel.`)}">
+    return `<li><button type="button" class="act${win ? '' : ' is-none'}${act.id === openId ? ' is-open' : ''}"
+        data-id="${act.id}" data-idx="${i0 + peakI}" aria-pressed="false">
       <span class="act-ic" aria-hidden="true"><svg viewBox="0 0 32 32">${ACT_IC[act.id]}</svg></span>
       <span class="act-name">${act.name}</span>
       <span class="act-when">${when}</span>
-      <span class="act-score"><b>${rating}</b><span>${score}/100</span></span>
+      <span class="act-score"><b>${rating}</b><span><span class="sr-only">, note de </span>${score}/100</span></span>
       <span class="act-strip" aria-hidden="true">${cells}</span>
       <span class="act-why">${esc(why)}</span>
     </button></li>`;
   }).join('');
+  syncActs();
 }
 $('#acts').addEventListener('click', e => {
-  const b = e.target.closest('.act'); if (!b) return;
-  setSel(+b.dataset.idx);
+  const b = e.target.closest('.act'); if (!b || !state.model) return;
+  const idx = +b.dataset.idx;
+  state.act = { id: b.dataset.id, sel: idx === state.model.nowIdx ? null : idx };
+  state.openAct = b.dataset.id;
+  $('#acts').querySelectorAll('.act').forEach(x => x.classList.toggle('is-open', x === b));
+  setSel(idx);
+  syncActs(); renderHero();
   if (innerWidth <= 960) $('#hero').scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+});
+/* Mobile : après avoir regardé le ciel d'un créneau, revenir exactement à l'activité choisie. */
+$('#back-acts').addEventListener('click', () => {
+  const b = state.act && $(`#acts .act[data-id="${state.act.id}"]`);
+  if (!b) return;
+  b.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'center' });
+  b.focus({ preventScroll: true });
 });
 
 /* ==========================================================================
@@ -980,10 +1045,11 @@ function renderWeek() {
       <button type="button" class="day-btn" aria-expanded="false" aria-controls="dm-${i}">
         <span class="d-name">${name}</span>
         <span class="d-ic">${wxIcon(d.code, 1)}<span class="sr-only">${wmo(d.code)[0]}</span></span>
-        <span class="d-pop">${(d.pop ?? 0) >= 20 ? `${IC_DROP}${d.pop} %` : ''}</span>
+        <span class="d-pop">${(d.pop ?? 0) >= 20 ? `${IC_DROP}<span class="sr-only">pluie </span>${d.pop} %` : ''}</span>
         <span class="d-min"><span class="sr-only">minimale </span>${fmtT(d.min)}</span>
         <span class="rb" aria-hidden="true"><i style="left:${l.toFixed(1)}%;right:${r.toFixed(1)}%;background:linear-gradient(90deg,${tempCSS(d.min)},${tempCSS(d.max)})"></i>${dot}</span>
         <span class="d-max"><span class="sr-only">maximale </span>${fmtT(d.max)}</span>
+        <svg class="d-chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5"/></svg>
       </button>
       <div class="day-more" id="dm-${i}"><div>
         <dl class="dm">
@@ -991,7 +1057,7 @@ function renderWeek() {
           <div><dt>Lever</dt><dd>${isFinite(d.sunrise) ? fmtClock(d.sunrise) : '–'}</dd></div>
           <div><dt>Coucher</dt><dd>${isFinite(d.sunset) ? fmtClock(d.sunset) : '–'}</dd></div>
           <div><dt>Durée du jour</dt><dd>${dl}</dd></div>
-          <div><dt>Pluie</dt><dd>${nf1.format(d.precip || 0)} mm (${d.pop ?? 0} %)</dd></div>
+          <div><dt>Pluie</dt><dd>${nf1.format(d.precip || 0)} mm, risque ${d.pop ?? 0} %</dd></div>
           <div><dt>Vent max</dt><dd>${U.wind(d.windMax)} ${U.windUnit()} (rafales ${U.wind(d.gustMax)})</dd></div>
           <div><dt>UV max</dt><dd>${Math.round(d.uvMax || 0)}</dd></div>
         </dl>
@@ -1066,9 +1132,12 @@ function renderInstruments() {
 
   // Visibilité
   const vis = s.vis;
-  if (vis == null) { $('#vis-v').textContent = '–'; $('#vis-l').textContent = ''; $('#vis-c').textContent = 'Donnée indisponible ici.'; }
+  if (vis == null) { $('#vis-v').textContent = '–'; $('#vis-l').textContent = ''; $('#vis-c').textContent = 'Donnée indisponible ici.'; $('#vis-dot').hidden = true; }
   else {
     const km = vis / 1000, val = U.imperial ? km * .621371 : km;
+    // Échelle logarithmique de 100 m à 40 km : les écarts comptent surtout dans la brume.
+    $('#vis-dot').hidden = false;
+    $('#vis-dot').style.left = `${clamp(Math.log10(Math.max(km, .1) / .1) / Math.log10(400), 0, 1) * 100}%`;
     $('#vis-v').textContent = val >= 10 ? Math.round(val) : nf1.format(val);
     $('#vis-u').textContent = U.imperial ? 'mi' : 'km';
     $('#vis-l').textContent = km >= 20 ? 'Excellente' : km >= 10 ? 'Bonne' : km >= 4 ? 'Moyenne' : km >= 1 ? 'Faible' : 'Très faible';
@@ -1205,7 +1274,8 @@ function renderClimate() {
     <p class="muted" style="margin:0;max-width:56ch">Avec ${fmtT(today)} prévus, aujourd'hui s'annonce plus chaud que ${pct} % des journées autour du ${dateTxt} entre ${c.from} et ${c.to}. Normale de saison : ${minus(nf1.format(U.delta(c.normal) + (U.imperial ? 32 : 0)))}°.</p>
     <div class="dist" id="clim-dist" role="img" aria-label="Répartition des ${c.all.length} maximales observées autour du ${dateTxt} depuis ${c.from}, avec la prévision du jour."></div>
     <h3 class="clim-h">La même quinzaine, année après année</h3>
-    <div class="stripes" id="stripes" role="img" aria-label="${esc(`Bandes climatiques de ${c.from} à ${c.to}. ${trend}`)}">
+    <div class="stripes" id="stripes" role="slider" tabindex="0" aria-label="${esc(`Bandes climatiques de ${c.from} à ${c.to}`)}"
+         aria-valuemin="${c.from}" aria-valuemax="${c.to}" aria-valuenow="${c.to}" aria-valuetext="${esc(trend)}">
       ${c.years.map(o => `<i data-y="${o.y}" data-v="${o.mean}" style="background:${anomColor(o.mean - c.normal)}"></i>`).join('')}
     </div>
     <div class="stripes-axis" aria-hidden="true"><span>${c.from}</span><span class="lg"><i style="background:${anomColor(-2.5)}"></i>plus frais <i style="background:${anomColor(2.5)}"></i>plus chaud que la normale</span><span>${c.to}</span></div>
@@ -1213,20 +1283,41 @@ function renderClimate() {
     <p class="note">Chaque bande est la moyenne des maximales sur 15 jours centrés sur le ${dateTxt}. Source : réanalyse ERA5 via Open-Meteo, maille d'environ 25 km. Comparaison indicative.</p>`;
   renderDist();
 
-  const strip = $('#stripes'), read = $('#stripes-read');
-  let on = null;
-  const show = e => {
-    const r = strip.getBoundingClientRect();
-    const i = clamp(Math.floor((e.clientX - r.left) / r.width * c.years.length), 0, c.years.length - 1);
-    const node = strip.children[i];
+  // Les années se lisent au pointeur comme au clavier (flèches, Origine, Fin, Échap).
+  const strip = $('#stripes'), read = $('#stripes-read'), last = c.years.length - 1;
+  let on = null, cur = -1;
+  const show = i => {
+    cur = clamp(i, 0, last);
     if (on) on.classList.remove('on');
-    on = node; node.classList.add('on');
-    const o = c.years[i], a = U.delta(o.mean - c.normal);
+    on = strip.children[cur]; on.classList.add('on');
+    const o = c.years[cur], a = U.delta(o.mean - c.normal);
     read.textContent = `${o.y} : ${fmtT(o.mean)} en moyenne, ${a >= 0 ? '+' : '−'}${nf1.format(Math.abs(a))}° par rapport à la normale.`;
+    strip.setAttribute('aria-valuenow', o.y);
+    strip.setAttribute('aria-valuetext', read.textContent);
   };
-  strip.addEventListener('pointermove', show);
-  strip.addEventListener('pointerdown', show);
-  strip.addEventListener('pointerleave', () => { if (on) on.classList.remove('on'); on = null; read.textContent = trend; });
+  const reset = () => {
+    if (on) on.classList.remove('on');
+    on = null; cur = -1; read.textContent = trend;
+    strip.setAttribute('aria-valuenow', c.to);
+    strip.setAttribute('aria-valuetext', trend);
+  };
+  const fromPointer = e => {
+    const r = strip.getBoundingClientRect();
+    show(Math.floor((e.clientX - r.left) / r.width * c.years.length));
+  };
+  strip.addEventListener('pointermove', fromPointer);
+  strip.addEventListener('pointerdown', fromPointer);
+  strip.addEventListener('pointerleave', () => { if (document.activeElement !== strip) reset(); });
+  strip.addEventListener('blur', reset);
+  strip.addEventListener('keydown', e => {
+    const map = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1, PageUp: 5, PageDown: -5 };
+    if (e.key in map) show(cur < 0 ? (map[e.key] > 0 ? 0 : last) : cur + map[e.key]);
+    else if (e.key === 'Home') show(0);
+    else if (e.key === 'End') show(last);
+    else if (e.key === 'Escape') reset();
+    else return;
+    e.preventDefault();
+  });
 }
 
 function renderDist() {
@@ -1286,6 +1377,7 @@ async function refreshFavTemps() {
 }
 $('#fav').addEventListener('click', () => {
   const p = state.place; if (!p) return;
+  const before = state.favs.slice();
   const i = state.favs.findIndex(f => samePlace(f, p));
   if (i >= 0) state.favs.splice(i, 1);
   else state.favs.push({ name: p.name, region: p.region, lat: p.lat, lon: p.lon });
@@ -1293,11 +1385,16 @@ $('#fav').addEventListener('click', () => {
   if (state.model && state.model.current) state.favTemps.set(keyOf(p), state.model.current.temperature_2m);
   const b = $('#fav'); b.classList.add('bump'); setTimeout(() => b.classList.remove('bump'), 220);
   renderPlaceHeader(); renderPlaces();
-  toast(i >= 0 ? `${p.name} retiré de vos lieux.` : `${p.name} enregistré dans vos lieux.`);
+  toast(i >= 0 ? `${p.name} retiré de vos lieux.` : `${p.name} enregistré dans vos lieux.`, {
+    label: 'Annuler',
+    run: () => { state.favs = before; store.set('favs', before); renderPlaceHeader(); renderPlaces(); },
+  });
 });
 
 const Q = $('#q'), LIST = $('#results');
-let results = [], active = -1, searchCtl = null;
+// resultsFor : la saisie à laquelle correspondent les résultats affichés (Entrée n'agit jamais sur une liste périmée).
+// altFor : saisie corrigée quand un second essai a rattrapé une faute de frappe.
+let results = [], resultsFor = '', altFor = '', active = -1, searchCtl = null, enterPending = false;
 function openList(html) {
   LIST.innerHTML = html; LIST.hidden = false; Q.setAttribute('aria-expanded', 'true');
 }
@@ -1306,47 +1403,68 @@ function closeList() {
 }
 function paintList() {
   if (!results.length) {
-    openList(`<li class="empty" role="option" aria-disabled="true">Aucune ville trouvée pour « ${esc(Q.value.trim())} ». Vérifiez l'orthographe ou essayez le nom en anglais.</li>`);
+    openList(`<li class="empty" role="option" aria-disabled="true">Aucune ville trouvée pour « ${esc(Q.value.trim())} ». Vérifiez l'orthographe, ou essayez une ville voisine.</li>`);
     return;
   }
-  openList(results.map((r, i) => `<li role="option" id="opt-${i}" data-i="${i}" aria-selected="${i === active}">
+  const note = altFor
+    ? `<li class="empty" role="option" aria-disabled="true">Aucune ville pour « ${esc(resultsFor)} ». Résultats pour « ${esc(altFor)} » :</li>`
+    : '';
+  openList(note + results.map((r, i) => `<li role="option" id="opt-${i}" data-i="${i}" aria-selected="${i === active}">
     <span class="r-name">${esc(r.name)}</span><span class="r-reg">${esc(r.region)}</span></li>`).join(''));
   if (active >= 0) Q.setAttribute('aria-activedescendant', `opt-${active}`);
 }
-const runSearch = debounce(async () => {
+async function geocode(v, signal) {
+  if (state.demo) return Demo.geocode(v);
+  const j = await API.geocode(v, signal);
+  return (j.results || []).map(r => ({
+    name: r.name, region: [r.admin1, r.country].filter(Boolean).join(', '), lat: r.latitude, lon: r.longitude,
+  }));
+}
+async function search() {
   const v = Q.value.trim();
-  if (v.length < 2) { closeList(); return; }
+  if (v.length < 2) { closeList(); results = []; resultsFor = ''; enterPending = false; return; }
   if (searchCtl) searchCtl.abort();
-  searchCtl = new AbortController();
+  const ctl = searchCtl = new AbortController();
+  let found, alt = '';
   try {
-    if (state.demo) results = Demo.geocode(v);
-    else {
-      const j = await API.geocode(v, searchCtl.signal);
-      results = (j.results || []).map(r => ({
-        name: r.name, region: [r.admin1, r.country].filter(Boolean).join(', '), lat: r.latitude, lon: r.longitude,
-      }));
+    found = await geocode(v, ctl.signal);
+    // Faute de frappe probable (« Pariss ») : un second essai sans la dernière lettre.
+    if (!found.length && v.length >= 4) {
+      const more = await geocode(v.slice(0, -1), ctl.signal);
+      if (more.length) { found = more; alt = v.slice(0, -1); }
     }
-    active = results.length ? 0 : -1;
-    if (document.activeElement === Q) paintList();
   } catch (e) {
     if (e.name === 'AbortError') return;
-    results = Demo.geocode(v);
-    active = results.length ? 0 : -1;
-    paintList();
+    found = Demo.geocode(v);
   }
-}, 220);
+  if (ctl !== searchCtl) return;
+  results = found; resultsFor = v; altFor = alt;
+  // À deux lettres, aucune ville n'est présélectionnée : Entrée ne charge pas « Pa, Burkina Faso » à la place de Paris.
+  active = results.length && v.length >= 3 ? 0 : -1;
+  if (enterPending) {
+    enterPending = false;
+    if (active >= 0) { choose(active); return; }
+  }
+  if (document.activeElement === Q) paintList();
+}
+const runSearch = debounce(search, 220);
 function choose(i) {
   const r = results[i]; if (!r) return;
   Q.value = ''; closeList(); Q.blur();
   loadPlace(r);
 }
-Q.addEventListener('input', runSearch);
+Q.addEventListener('input', () => { enterPending = false; runSearch(); });
 Q.addEventListener('keydown', e => {
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     if (!results.length) return;
     active = (active + (e.key === 'ArrowDown' ? 1 : -1) + results.length) % results.length;
     paintList(); e.preventDefault();
-  } else if (e.key === 'Enter') { if (active >= 0) choose(active); e.preventDefault(); }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const v = Q.value.trim();
+    if (resultsFor === v) { if (active >= 0) choose(active); }
+    else if (v.length >= 3) { enterPending = true; search(); } // résultats pas encore arrivés : on attend les bons
+  }
   else if (e.key === 'Escape') { if (!LIST.hidden) closeList(); else { Q.value = ''; Q.blur(); } }
 });
 Q.addEventListener('blur', () => setTimeout(closeList, 120));
@@ -1429,7 +1547,7 @@ async function loadPlace(place, { refresh = false } = {}) {
     state.model = buildModel(f);
     state.sel = null;
     state.placeChanged = changed || !refresh;
-    if (changed) { state.aq = null; state.aqFailed = false; state.climate = null; }
+    if (changed) { state.aq = null; state.aqFailed = false; state.climate = null; state.act = null; state.openAct = null; }
     renderAll();
     state.placeChanged = false;
     document.body.classList.remove('is-loading');
